@@ -4,17 +4,13 @@
   "description": "CMNexo WhatsApp Bridge — Desarrollado por Carlos Mejía",
   "main": "wa_bridge.js",
   "scripts": {
-    "start": "node wa_bridge.js",
-    "dev": "nodemon wa_bridge.js"
+    "start": "node wa_bridge.js"
   },
   "dependencies": {
-    "whatsapp-web.js": "^1.23.0",
+    "whatsapp-web.js": "^1.26.0",
     "qrcode": "^1.5.3",
     "express": "^4.18.2",
-    "node-fetch": "^2.7.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.2"
+    "cors": "^2.8.5"
   },
   "engines": {
     "node": ">=18.0.0"
