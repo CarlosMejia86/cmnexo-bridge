@@ -29,7 +29,23 @@ function createSession(restauranteId) {
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--single-process',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--disable-translate',
+        '--hide-scrollbars',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--safebrowsing-disable-auto-update',
+      ]
     }
   });
 
@@ -44,9 +60,28 @@ function createSession(restauranteId) {
     }
   });
 
+  client.on('authenticated', () => {
+    console.log(`[${restauranteId}] 🔐 Autenticado — esperando 'ready'...`);
+    // Borrar QR viejo para que el polling no lo devuelva más
+    const qrPath = path.join(DATA_DIR, `qr_${restauranteId}.json`);
+    if (fs.existsSync(qrPath)) fs.unlinkSync(qrPath);
+  });
+
   client.on('ready', () => {
     console.log(`[${restauranteId}] ✅ WhatsApp listo`);
     fs.writeFileSync(path.join(DATA_DIR, `session_${restauranteId}.json`), JSON.stringify({ status: 'connected', phone: client.info?.wid?.user || 'N/A' }));
+  });
+
+  client.on('auth_failure', (msg) => {
+    console.error(`[${restauranteId}] ❌ Auth fallida:`, msg);
+    delete sessions[restauranteId];
+  });
+
+  client.on('disconnected', (reason) => {
+    console.log(`[${restauranteId}] Desconectado:`, reason);
+    const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
+    if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
+    delete sessions[restauranteId];
   });
 
   client.on('message', async (msg) => {
