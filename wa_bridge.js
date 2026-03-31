@@ -65,13 +65,21 @@ function createSession(restauranteId) {
   return client;
 }
 
-app.get('/', (req, res) => res.send('CMNexo WA Bridge - Running 🚀'));
+app.get('/', (req, res) => res.json({ 
+  status: 'online', 
+  service: 'CMNexo WA Bridge', 
+  version: '1.1.0',
+  data_dir: fs.existsSync(DATA_DIR) ? 'active' : 'missing'
+}));
+
+app.get('/health', (req, res) => res.status(200).json({ status: 'OK', uptime: process.uptime() }));
 
 app.post('/session/start', (req, res) => {
   const { restaurante_id } = req.body;
-  if (!restaurante_id) return res.status(400).send('Falta restaurante_id');
+  if (!restaurante_id) return res.status(400).json({ error: 'Falta restaurante_id' });
+  console.log(`[${restaurante_id}] Petición de inicio de sesión recibida`);
   createSession(restaurante_id);
-  res.json({ message: 'Iniciando...' });
+  res.json({ status: 'starting', message: 'Iniciando cliente de WhatsApp...' });
 });
 
 app.get('/session/:id/status', (req, res) => {
