@@ -33,9 +33,15 @@ function createSession(restauranteId) {
     }
   });
 
-  client.on('qr', (qr) => {
+  client.on('qr', async (qr) => {
     console.log(`[${restauranteId}] QR generado`);
-    fs.writeFileSync(path.join(DATA_DIR, `qr_${restauranteId}.json`), JSON.stringify({ qr, timestamp: Math.floor(Date.now()/1000) }));
+    try {
+      const qrImage = await qrcode.toDataURL(qr, { margin: 1, width: 256 });
+      fs.writeFileSync(path.join(DATA_DIR, `qr_${restauranteId}.json`), JSON.stringify({ qr: qrImage, timestamp: Math.floor(Date.now()/1000) }));
+    } catch(e) {
+      // fallback: guardar el string raw
+      fs.writeFileSync(path.join(DATA_DIR, `qr_${restauranteId}.json`), JSON.stringify({ qr, timestamp: Math.floor(Date.now()/1000) }));
+    }
   });
 
   client.on('ready', () => {
