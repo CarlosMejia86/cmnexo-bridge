@@ -106,17 +106,35 @@ function createSession(restauranteId) {
         await client.sendMessage(msg.from, "¡Hola! 👋 Soy el asistente virtual. Escribe *menú* para ver los productos disponibles.");
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió saludo' });
       } else if (bodyLower.match(/^(menú|menu|carta|productos|ver menu|ver menú)/)) {
-        const res = await fetch(`${API_URL}/menu/${restauranteId}`);
-        if (res.ok) {
-          const data = await res.json();
-          const items = Array.isArray(data) ? data : (data.items || data.menu || []);
-          if (items.length > 0) {
-            const lines = items.slice(0, 10).map(i => `• *${i.nombre || i.name}* — $${i.precio || i.price}`).join('\n');
-            await client.sendMessage(msg.from, `📋 *Nuestro menú:*\n\n${lines}\n\nEscribe el nombre del producto para pedirlo.`);
-            logActivity(restauranteId, { type: 'out', text: 'Bot envió menú' });
+        try {
+          const menuUrl = `${API_URL}/menu/${restauranteId}`;
+          console.log(`[${restauranteId}] Fetching menu: ${menuUrl}`);
+          const res = await fetch(menuUrl);
+          console.log(`[${restauranteId}] Menu response status: ${res.status}`);
+          if (res.ok) {
+            const data = await res.json();
+            const items = Array.isArray(data) ? data : (data.items || data.menu || []);
+            console.log(`[${restauranteId}] Menu items: ${items.length}`);
+            if (items.length > 0) {
+              const lines = items.slice(0, 10).map(i => {
+                const nombre = i.nombre || i.name || 'Producto';
+                const precio = (i.precio !== undefined && i.precio !== null) ? i.precio : (i.price ?? '');
+                return `• *${nombre}* — $${precio}`;
+              }).join('\n');
+              await client.sendMessage(msg.from, `📋 *Nuestro menú:*\n\n${lines}\n\nEscribe el nombre del producto para pedirlo.`);
+              logActivity(restauranteId, { type: 'out', text: 'Bot envió menú' });
+            } else {
+              await client.sendMessage(msg.from, "📋 Menú no disponible en este momento. Intenta más tarde.");
+              logActivity(restauranteId, { type: 'out', text: 'Bot: menú vacío' });
+            }
           } else {
-            await client.sendMessage(msg.from, "📋 Menú no disponible en este momento. Intenta más tarde.");
+            const errText = await res.text();
+            console.error(`[${restauranteId}] Menu API error ${res.status}: ${errText}`);
+            await client.sendMessage(msg.from, "📋 No pude cargar el menú en este momento. Intenta de nuevo.");
           }
+        } catch(menuErr) {
+          console.error(`[${restauranteId}] Menu fetch error:`, menuErr.message);
+          await client.sendMessage(msg.from, "📋 Error al cargar el menú. Intenta de nuevo.");
         }
       } else if (bodyLower.match(/^(horario|horarios|hora|abren|cierran|atención)/)) {
         await client.sendMessage(msg.from, "🕐 Consulta nuestros horarios directamente con el restaurante.");
