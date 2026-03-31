@@ -171,6 +171,33 @@ app.post('/session/start', (req, res) => {
   res.json({ status: 'starting', message: 'Iniciando cliente de WhatsApp...' });
 });
 
+app.post('/session/:id/disconnect', async (req, res) => {
+  const id = req.params.id;
+  console.log(`[${id}] Desconectando sesión...`);
+  try {
+    if (sessions[id]) {
+      await sessions[id].logout().catch(() => {});
+      await sessions[id].destroy().catch(() => {});
+      delete sessions[id];
+    }
+    // Borrar archivos de sesión y QR
+    const filesToDelete = [
+      path.join(DATA_DIR, `session_${id}.json`),
+      path.join(DATA_DIR, `qr_${id}.json`),
+    ];
+    filesToDelete.forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
+    // Borrar carpeta de LocalAuth (credenciales guardadas)
+    const authDir = path.join(DATA_DIR, `session-${id}`);
+    if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
+    delete activityStore[id];
+    console.log(`[${id}] Sesión destruida`);
+    res.json({ status: 'disconnected' });
+  } catch(e) {
+    console.error(`[${id}] Error al desconectar:`, e.message);
+    res.json({ status: 'disconnected', note: e.message });
+  }
+});
+
 app.get('/session/:id/activity', (req, res) => {
   const id = req.params.id;
   const since = parseInt(req.query.since) || 0;
