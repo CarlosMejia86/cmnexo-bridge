@@ -16,6 +16,14 @@ const sessions = {};
 const DATA_DIR = path.join(__dirname, '.wwebjs_auth');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// Store de actividad reciente por restaurante (últimos 50 mensajes en memoria)
+const activityStore = {};
+function logActivity(restauranteId, entry) {
+  if (!activityStore[restauranteId]) activityStore[restauranteId] = [];
+  activityStore[restauranteId].unshift({ ...entry, ts: Date.now() });
+  if (activityStore[restauranteId].length > 50) activityStore[restauranteId].pop();
+}
+
 function createSession(restauranteId) {
   if (sessions[restauranteId]) return sessions[restauranteId];
 
@@ -86,16 +94,38 @@ function createSession(restauranteId) {
 
   client.on('message', async (msg) => {
     if (msg.isGroupMsg) return;
-    console.log(`[${restauranteId}] Mensaje de ${msg.from}`);
+    const from = msg.from.replace('@c.us', '');
+    const body = msg.body.trim();
+    console.log(`[${restauranteId}] Mensaje de ${from}: ${body.substring(0, 60)}`);
+
+    logActivity(restauranteId, { type: 'in', text: `${from} escribió: ${body.substring(0, 40)}` });
+
     try {
-      const res = await fetch(`${API_URL}/menu/${restauranteId}`);
-      if (res.ok) {
-        const menu = await res.json();
-        if (msg.body.toLowerCase().includes('hola')) {
-          await client.sendMessage(msg.from, "¡Hola! 👋 Soy el bot de pedidos. Escribe *menú* para ver los productos.");
+      const bodyLower = body.toLowerCase();
+      if (bodyLower.match(/^(hola|hi|hello|buenas|buenos|buen día|buenas tardes|buenas noches|hey|ola)/)) {
+        await client.sendMessage(msg.from, "¡Hola! 👋 Soy el asistente virtual. Escribe *menú* para ver los productos disponibles.");
+        logActivity(restauranteId, { type: 'out', text: 'Bot respondió saludo' });
+      } else if (bodyLower.match(/^(menú|menu|carta|productos|ver menu|ver menú)/)) {
+        const res = await fetch(`${API_URL}/menu/${restauranteId}`);
+        if (res.ok) {
+          const data = await res.json();
+          const items = Array.isArray(data) ? data : (data.items || data.menu || []);
+          if (items.length > 0) {
+            const lines = items.slice(0, 10).map(i => `• *${i.nombre || i.name}* — $${i.precio || i.price}`).join('\n');
+            await client.sendMessage(msg.from, `📋 *Nuestro menú:*\n\n${lines}\n\nEscribe el nombre del producto para pedirlo.`);
+            logActivity(restauranteId, { type: 'out', text: 'Bot envió menú' });
+          } else {
+            await client.sendMessage(msg.from, "📋 Menú no disponible en este momento. Intenta más tarde.");
+          }
         }
+      } else if (bodyLower.match(/^(horario|horarios|hora|abren|cierran|atención)/)) {
+        await client.sendMessage(msg.from, "🕐 Consulta nuestros horarios directamente con el restaurante.");
+        logActivity(restauranteId, { type: 'out', text: 'Bot respondió horario' });
+      } else if (bodyLower.match(/^(domicilio|delivery|envío|envio|despacho|llevan)/)) {
+        await client.sendMessage(msg.from, "🛵 Sí hacemos domicilios. ¿Cuál es tu dirección?");
+        logActivity(restauranteId, { type: 'out', text: 'Bot respondió domicilio' });
       }
-    } catch(e) { console.error("Error en bot:", e.message); }
+    } catch(e) { console.error(`[${restauranteId}] Error en bot:`, e.message); }
   });
 
   client.initialize().catch(err => {
@@ -121,6 +151,13 @@ app.post('/session/start', (req, res) => {
   console.log(`[${restaurante_id}] Petición de inicio de sesión recibida`);
   createSession(restaurante_id);
   res.json({ status: 'starting', message: 'Iniciando cliente de WhatsApp...' });
+});
+
+app.get('/session/:id/activity', (req, res) => {
+  const id = req.params.id;
+  const since = parseInt(req.query.since) || 0;
+  const items = (activityStore[id] || []).filter(e => e.ts > since);
+  res.json({ items, serverTime: Date.now() });
 });
 
 app.get('/session/:id/status', (req, res) => {
