@@ -152,9 +152,13 @@ function createSession(restauranteId) {
   });
 
   client.on('message', async (msg) => {
+    // Ignorar mensajes de grupos (compatibilidad con versiones nuevas de wwebjs)
+    if (msg.from && msg.from.endsWith('@g.us')) return;
     if (msg.isGroupMsg) return;
+    if (!msg.body) return;
     const from = msg.from.replace('@c.us', '');
     const body = msg.body.trim();
+    if (!body) return;
     console.log(`[${restauranteId}] Mensaje de ${from}: ${body.substring(0, 60)}`);
 
     logActivity(restauranteId, { type: 'in', text: `${from} escribió: ${body.substring(0, 40)}` });
@@ -166,7 +170,7 @@ function createSession(restauranteId) {
       const num = parseInt(body);
 
       // --- SALUDO ---
-      if (bodyLower.match(/^(hola|hi|hello|buenas|buenos|buen d[ií]a|buenas tardes|buenas noches|hey|ola)\b/)) {
+      if (bodyLower.match(/^(hola|hi|hello|buenas|buenos|buen\s?d[ií]a|buenas tardes|buenas noches|hey|ola|buenos d[ií]as)/)) {
         resetConv(restauranteId, from);
         await client.sendMessage(msg.from,
           `¡Hola! 👋 Bienvenido.\n\nEscribe una opción:\n\n` +
@@ -264,6 +268,12 @@ function createSession(restauranteId) {
       }
 
     } catch(e) { console.error(`[${restauranteId}] Error en bot:`, e.message); }
+  });
+
+  // Algunos builds de wwebjs usan message_create en vez de message
+  client.on('message_create', async (msg) => {
+    if (msg.fromMe) return; // ignorar mensajes enviados por el bot
+    client.emit('message', msg);
   });
 
   client.initialize().catch(err => {
