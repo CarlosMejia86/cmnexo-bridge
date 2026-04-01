@@ -101,6 +101,7 @@ function createSession(restauranteId) {
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-zygote',
+        '--single-process',
         '--disable-extensions',
         '--disable-background-networking',
         '--disable-default-apps',
@@ -109,8 +110,6 @@ function createSession(restauranteId) {
         '--hide-scrollbars',
         '--mute-audio',
         '--safebrowsing-disable-auto-update',
-        '--disable-features=VizDisplayCompositor',
-        '--shm-size=128m',
       ]
     }
   });
