@@ -32,9 +32,6 @@ function getConv(restauranteId, phone) {
   if (!convState[restauranteId][phone]) convState[restauranteId][phone] = { step: 'idle', menuItems: [], cart: [] };
   return convState[restauranteId][phone];
 }
-function resetConv(restauranteId, phone) {
-  if (convState[restauranteId]) convState[restauranteId][phone] = { step: 'idle', menuItems: [], cart: [] };
-}
 
 const NUM_EMOJIS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
 
@@ -172,7 +169,11 @@ function createSession(restauranteId) {
 
       // --- SALUDO ---
       if (bodyLower.match(/^(hola|hi|hello|buenas|buenos|buen\s?d[ií]a|buenas tardes|buenas noches|hey|ola|buenos d[ií]as)/)) {
-        resetConv(restauranteId, from);
+        // Resetear en el mismo objeto para no perder la referencia
+        conv.step = 'main_menu';
+        conv.menuItems = [];
+        conv.cart = [];
+        conv.selectedItem = null;
         await client.sendMessage(msg.from,
           `¡Hola! 👋 Bienvenido.\n\nEscribe una opción:\n\n` +
           `1️⃣ Ver *menú*\n` +
@@ -180,7 +181,6 @@ function createSession(restauranteId) {
           `3️⃣ Info sobre *domicilios*\n\n` +
           `_Responde con el número o escribe directamente lo que necesitas._`
         );
-        conv.step = 'main_menu';
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió saludo con menú principal' });
 
       // --- MENÚ PRINCIPAL NUMÉRICO (cuando step=main_menu) ---
@@ -247,7 +247,7 @@ function createSession(restauranteId) {
         const direccion = body;
         const resumen = conv.cart.map(i => i.nombre).join(', ');
         const total = conv.cart.reduce((s, i) => s + (Number(i.precio) || 0), 0);
-        resetConv(restauranteId, from);
+        conv.step = 'idle'; conv.menuItems = []; conv.cart = []; conv.selectedItem = null;
         await client.sendMessage(msg.from,
           `🎉 *¡Pedido recibido!*\n\n` +
           `📋 ${resumen}\n` +
