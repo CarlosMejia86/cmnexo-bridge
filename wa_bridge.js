@@ -151,9 +151,10 @@ function createSession(restauranteId) {
     delete sessions[restauranteId];
   });
 
-  client.on('message', async (msg) => {
-    // Ignorar mensajes de grupos (compatibilidad con versiones nuevas de wwebjs)
-    if (msg.from && msg.from.endsWith('@g.us')) return;
+  async function handleMsg(msg) {
+    if (!msg || !msg.from) return;
+    if (msg.fromMe) return;
+    if (msg.from.endsWith('@g.us')) return;
     if (msg.isGroupMsg) return;
     if (!msg.body) return;
     const from = msg.from.replace('@c.us', '');
@@ -268,13 +269,18 @@ function createSession(restauranteId) {
       }
 
     } catch(e) { console.error(`[${restauranteId}] Error en bot:`, e.message); }
-  });
+  }
 
-  // Algunos builds de wwebjs usan message_create en vez de message
-  client.on('message_create', async (msg) => {
-    if (msg.fromMe) return; // ignorar mensajes enviados por el bot
-    client.emit('message', msg);
-  });
+  const processed = new Set();
+  async function handleMsgOnce(msg) {
+    const key = msg.id?._serialized || msg.id?.id || `${msg.from}-${Date.now()}`;
+    if (processed.has(key)) return;
+    processed.add(key);
+    if (processed.size > 200) { const first = processed.values().next().value; processed.delete(first); }
+    await handleMsg(msg);
+  }
+  client.on('message', handleMsgOnce);
+  client.on('message_create', handleMsgOnce);
 
   client.initialize().catch(err => {
     console.error(`[${restauranteId}] FATAL: No se pudo iniciar el navegador:`, err.message);
