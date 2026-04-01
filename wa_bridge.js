@@ -91,10 +91,14 @@ function createSession(restauranteId) {
   console.log(`[${restauranteId}] Creando nueva sesión WhatsApp...`);
 
   const client = new Client({
-    authStrategy: new LocalAuth({ 
+    authStrategy: new LocalAuth({
       clientId: restauranteId,
-      dataPath: DATA_DIR 
+      dataPath: DATA_DIR
     }),
+    webVersionCache: {
+      type: 'remote',
+      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
+    },
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
