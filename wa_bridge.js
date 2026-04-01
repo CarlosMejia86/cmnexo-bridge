@@ -9,8 +9,9 @@ const app     = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-const API_URL = process.env.API_URL || 'https://mediumslateblue-hippopotamus-819647.hostingersite.com/api';
+const PORT      = process.env.PORT      || 3000;
+const API_URL   = process.env.API_URL   || 'https://mediumslateblue-hippopotamus-819647.hostingersite.com/api';
+const STORE_URL = process.env.STORE_URL || API_URL.replace('/api', '');
 
 console.log('=== CMNexo WA Bridge v1.2.0 iniciando ===');
 
@@ -26,61 +27,8 @@ function logActivity(restauranteId, entry) {
   if (activityStore[restauranteId].length > 50) activityStore[restauranteId].pop();
 }
 
-// Estado de conversación por restaurante y teléfono
-// { [restauranteId]: { [phone]: { step, menuItems, selectedItem, cart } } }
-const convState = {};
-function getConv(restauranteId, phone) {
-  if (!convState[restauranteId]) convState[restauranteId] = {};
-  if (!convState[restauranteId][phone]) convState[restauranteId][phone] = { step: 'idle', menuItems: [], cart: [] };
-  return convState[restauranteId][phone];
-}
-
-const NUM_EMOJIS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
-
-async function enviarMenuNumerado(client, msg, restauranteId, from, conv) {
-  try {
-    const res = await fetch(`${API_URL}/menu/${restauranteId}`);
-    if (!res.ok) {
-      await client.sendMessage(msg.from, "📋 No pude cargar el menú ahora. Intenta en un momento.");
-      return;
-    }
-    const data = await res.json();
-    const items = (Array.isArray(data) ? data : (data.items || data.menu || [])).filter(i => i.disponible !== 0);
-    if (items.length === 0) {
-      await client.sendMessage(msg.from, "📋 El menú está vacío en este momento. Intenta más tarde.");
-      logActivity(restauranteId, { type: 'out', text: 'Bot: menú vacío' });
-      return;
-    }
-    // Agrupar por categoría
-    const categorias = {};
-    items.forEach(i => {
-      const cat = i.categoria || 'General';
-      if (!categorias[cat]) categorias[cat] = [];
-      categorias[cat].push(i);
-    });
-    // Armar lista numerada global
-    const todosOrdenados = [];
-    let texto = '📋 *Nuestro menú:*\n';
-    Object.entries(categorias).forEach(([cat, prods]) => {
-      texto += `\n🏷️ *${cat.toUpperCase()}*\n`;
-      prods.forEach(p => {
-        todosOrdenados.push(p);
-        const n = todosOrdenados.length;
-        const emoji = NUM_EMOJIS[n - 1] || `${n}.`;
-        const precio = (p.precio !== undefined && p.precio !== null) ? Number(p.precio).toLocaleString('es-CO') : '0';
-        texto += `${emoji} ${p.nombre} — *$${precio}*\n`;
-      });
-    });
-    texto += '\n_Responde con el *número* del producto que deseas pedir._\n📦 Escribe *finalizar* cuando termines.';
-    conv.menuItems = todosOrdenados;
-    conv.step = 'menu_shown';
-    await client.sendMessage(msg.from, texto);
-    logActivity(restauranteId, { type: 'out', text: `Bot envió menú (${todosOrdenados.length} items)` });
-  } catch(e) {
-    console.error(`[${restauranteId}] Error cargando menú:`, e.message);
-    await client.sendMessage(msg.from, "📋 Error al cargar el menú. Intenta de nuevo.");
-  }
-}
+// Caché de nombres de restaurante { [restauranteId]: 'Nombre' }
+const restaurantNames = {};
 
 function createSession(restauranteId) {
   if (sessions[restauranteId]) {
@@ -95,10 +43,6 @@ function createSession(restauranteId) {
       clientId: restauranteId,
       dataPath: DATA_DIR
     }),
-    webVersionCache: {
-      type: 'remote',
-      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
-    },
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
@@ -179,6 +123,16 @@ function createSession(restauranteId) {
   client.on('ready', () => {
     console.log(`[${restauranteId}] ✅ WhatsApp listo (evento ready)`);
     writeSessionConnected();
+    // Cargar nombre del restaurante para usarlo en los mensajes del bot
+    fetch(`${API_URL}/tienda?r=${restauranteId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.restaurante?.nombre) {
+          restaurantNames[restauranteId] = data.restaurante.nombre;
+          console.log(`[${restauranteId}] Nombre cargado: ${data.restaurante.nombre}`);
+        }
+      })
+      .catch(() => {});
   });
 
   client.on('auth_failure', (msg) => {
@@ -200,148 +154,39 @@ function createSession(restauranteId) {
     if (msg.isGroupMsg) return;
     if (!msg.body) return;
     const from = msg.from.replace('@c.us', '');
-    // Limpiar caracteres Unicode invisibles que WhatsApp inserta
     const body = msg.body.replace(/[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g, '').trim();
     if (!body) return;
+
     console.log(`[${restauranteId}] Mensaje de ${from}: ${JSON.stringify(body.substring(0, 60))}`);
+    logActivity(restauranteId, { type: 'in', text: `${from}: ${body.substring(0, 40)}` });
 
-    logActivity(restauranteId, { type: 'in', text: `${from} escribió: ${body.substring(0, 40)}` });
-
-    const conv = getConv(restauranteId, from);
+    const storeLink = `${STORE_URL}/tienda.html?r=${restauranteId}`;
+    const restName  = restaurantNames[restauranteId] || 'nuestro restaurante';
+    const bl        = body.toLowerCase();
 
     try {
-      const bodyLower = body.toLowerCase();
-      // Extraer número: buscar primer dígito en el mensaje
-      const numMatch = body.match(/^\s*(\d+)\s*$/);
-      const num = numMatch ? parseInt(numMatch[1]) : NaN;
-      console.log(`[${restauranteId}] step=${conv.step} num=${num} body=${JSON.stringify(body)}`);
-
-      // --- SALUDO ---
-      if (bodyLower.match(/^(hola|hi|hello|buenas|buenos|buen\s?d[ií]a|buenas tardes|buenas noches|hey|ola|buenos d[ií]as)/)) {
-        // Resetear en el mismo objeto para no perder la referencia
-        conv.step = 'main_menu';
-        conv.menuItems = [];
-        conv.cart = [];
-        conv.selectedItem = null;
+      if (bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/)) {
         await client.sendMessage(msg.from,
-          `¡Hola! 👋 Bienvenido.\n\nEscribe una opción:\n\n` +
-          `1️⃣ Ver *menú*\n` +
-          `2️⃣ Consultar *horarios*\n` +
-          `3️⃣ Info sobre *domicilios*\n\n` +
-          `_Responde con el número o escribe directamente lo que necesitas._`
+          `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n` +
+          `👉 Haz tu pedido aquí:\n${storeLink}`
         );
-        logActivity(restauranteId, { type: 'out', text: 'Bot respondió saludo con menú principal' });
-
-      // --- MENÚ PRINCIPAL NUMÉRICO (cuando step=main_menu) ---
-      } else if (conv.step === 'main_menu' && (num === 1 || body === '1' || bodyLower.match(/^(men[uú]|carta|productos|ver men[uú])/))) {
-        await enviarMenuNumerado(client, msg, restauranteId, from, conv);
-
-      } else if (conv.step === 'main_menu' && (num === 2 || body === '2' || bodyLower.match(/^(horario|hora|abren|cierran)/))) {
-        await client.sendMessage(msg.from, "🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n_Escribe *menú* para ver productos._");
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió horario' });
 
-      } else if (conv.step === 'main_menu' && (num === 3 || body === '3' || bodyLower.match(/^(domicilio|delivery|env[ií]o|despacho|llevan)/))) {
-        await client.sendMessage(msg.from, "🛵 *Domicilios:*\n\nSí hacemos entregas a domicilio. El tiempo estimado es de 25–40 min.\n\nEscribe *menú* para hacer tu pedido. 🍔");
-        logActivity(restauranteId, { type: 'out', text: 'Bot respondió domicilio' });
-
-      // --- SOLICITUD DIRECTA DE MENÚ (cualquier momento) ---
-      } else if (bodyLower.match(/^(men[uú]|carta|productos|ver men[uú]|quiero pedir|pedido|pedir)/)) {
-        await enviarMenuNumerado(client, msg, restauranteId, from, conv);
-
-      // --- SELECCIÓN NUMÉRICA DEL MENÚ ---
-      } else if (conv.step === 'menu_shown' && !isNaN(num) && num >= 1 && num <= conv.menuItems.length && conv.menuItems.length > 0) {
-        const item = conv.menuItems[num - 1];
-        const precio = (item.precio !== undefined && item.precio !== null) ? item.precio : 0;
-        conv.selectedItem = item;
-        conv.step = 'item_selected';
+      } else if (bl.match(/domicilio|delivery|env[ií]o|despacho|llevan/)) {
         await client.sendMessage(msg.from,
-          `${NUM_EMOJIS[num-1]} *${item.nombre}*\n` +
-          (item.descripcion ? `_${item.descripcion}_\n` : '') +
-          `💰 Precio: *$${Number(precio).toLocaleString('es-CO')}*\n\n` +
-          `¿Confirmas este producto?\n\n✅ Escribe *sí* para agregar\n❌ Escribe *no* para volver al menú`
+          `🛵 Sí hacemos domicilios. Tiempo estimado: 25–40 min.\n\n` +
+          `👉 Haz tu pedido aquí:\n${storeLink}`
         );
-        logActivity(restauranteId, { type: 'out', text: `Bot mostró detalle: ${item.nombre}` });
+        logActivity(restauranteId, { type: 'out', text: 'Bot respondió domicilio + link' });
 
-      // --- CONFIRMACIÓN DEL PRODUCTO ---
-      } else if (conv.step === 'item_selected' && bodyLower.match(/^(s[ií]|yes|ok|dale|listo|confirmar|confirmo)/)) {
-        const item = conv.selectedItem;
-        const precio = (item.precio !== undefined && item.precio !== null) ? item.precio : 0;
-        conv.cart.push(item);
-        conv.step = 'collecting_order';
+      } else {
         await client.sendMessage(msg.from,
-          `✅ *${item.nombre}* agregado.\n\n` +
-          `¿Deseas agregar algo más?\n\n` +
-          `📋 Escribe *menú* para seguir eligiendo\n` +
-          `📦 Escribe *finalizar* para completar tu pedido`
+          `¡Hola! 👋 Bienvenido a *${restName}*.\n\n` +
+          `🛒 Haz tu pedido aquí:\n${storeLink}\n\n` +
+          `Selecciona tus productos, elige adiciones y confirma en segundos. 😊`
         );
-        logActivity(restauranteId, { type: 'out', text: `Cliente agregó: ${item.nombre}` });
-
-      } else if (conv.step === 'item_selected' && bodyLower.match(/^(no|cancelar|volver|atr[aá]s)/)) {
-        await enviarMenuNumerado(client, msg, restauranteId, from, conv);
-
-      // --- FINALIZAR PEDIDO ---
-      } else if (bodyLower.match(/^(finalizar|terminar|listo|eso es todo|eso seria todo)/) && conv.cart.length > 0) {
-        const resumen = conv.cart.map(i => `• ${i.nombre}`).join('\n');
-        const total = conv.cart.reduce((s, i) => s + (Number(i.precio) || 0), 0);
-        conv.step = 'awaiting_address';
-        await client.sendMessage(msg.from,
-          `🛒 *Resumen de tu pedido:*\n${resumen}\n\n` +
-          `💰 Total estimado: *$${total.toLocaleString('es-CO')}*\n\n` +
-          `📍 ¿Cuál es tu dirección de entrega?\n_Escribe tu dirección para continuar o *recoger* si vas a retirar en el local._`
-        );
-        logActivity(restauranteId, { type: 'out', text: `Bot solicitó dirección. Carrito: ${conv.cart.length} items` });
-
-      // --- DIRECCIÓN DE ENTREGA ---
-      } else if (conv.step === 'awaiting_address') {
-        const direccion = body;
-        const esRecoger = /^recoger$/i.test(body.trim());
-        const total = conv.cart.reduce((s, i) => s + (Number(i.precio) || 0), 0);
-        const resumenTexto = conv.cart.map(i => i.nombre).join(', ');
-        const itemsApi = conv.cart.map(i => ({ nombre: i.nombre, qty: 1, precio: Number(i.precio) || 0 }));
-
-        conv.step = 'idle'; conv.menuItems = []; conv.cart = []; conv.selectedItem = null;
-
-        // Guardar pedido en la BD
-        try {
-          await fetch(`${API_URL}/pedidos`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              restaurante_id:   restauranteId,
-              cliente_telefono: from,
-              cliente_nombre:   from,
-              cliente_direccion: esRecoger ? null : direccion,
-              tipo_entrega:     esRecoger ? 'recoger' : 'domicilio',
-              items:    itemsApi,
-              subtotal: total,
-              total:    total,
-              canal:    'whatsapp',
-            })
-          });
-        } catch(pedErr) {
-          console.error(`[${restauranteId}] Error guardando pedido:`, pedErr.message);
-        }
-
-        await client.sendMessage(msg.from,
-          `🎉 *¡Pedido recibido!*\n\n` +
-          `📋 ${resumenTexto}\n` +
-          `📍 ${esRecoger ? 'Retiro en el local 🏃' : `Entrega en: ${direccion}`}\n` +
-          `💰 Total: *$${total.toLocaleString('es-CO')}*\n\n` +
-          `⏱️ Tiempo estimado: 25–40 min\n` +
-          `Nos pondremos en contacto pronto para confirmar. ¡Gracias! 🙌`
-        );
-        logActivity(restauranteId, { type: 'out', text: `Pedido guardado: ${resumenTexto}` });
-
-      // --- HORARIOS Y DOMICILIOS DIRECTOS ---
-      } else if (bodyLower.match(/^(horario|horarios|hora|abren|cierran|atenci[oó]n)/)) {
-        await client.sendMessage(msg.from, "🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado");
-        logActivity(restauranteId, { type: 'out', text: 'Bot respondió horario' });
-
-      } else if (bodyLower.match(/^(domicilio|delivery|env[ií]o|envio|despacho|llevan)/)) {
-        await client.sendMessage(msg.from, "🛵 Sí hacemos domicilios. Escribe *menú* para hacer tu pedido.");
-        logActivity(restauranteId, { type: 'out', text: 'Bot respondió domicilio' });
+        logActivity(restauranteId, { type: 'out', text: 'Bot envió link de tienda' });
       }
-
     } catch(e) { console.error(`[${restauranteId}] Error en bot:`, e.message); }
   }
 
