@@ -12,6 +12,8 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const API_URL = process.env.API_URL || 'https://mediumslateblue-hippopotamus-819647.hostingersite.com/api';
 
+console.log('=== CMNexo WA Bridge v1.2.0 iniciando ===');
+
 const sessions = {};
 const DATA_DIR = path.join(__dirname, '.wwebjs_auth');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
