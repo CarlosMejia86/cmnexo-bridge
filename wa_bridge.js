@@ -104,7 +104,6 @@ function createSession(restauranteId) {
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-zygote',
-        '--single-process',
         '--disable-extensions',
         '--disable-background-networking',
         '--disable-default-apps',
@@ -128,16 +127,54 @@ function createSession(restauranteId) {
     }
   });
 
+  let readyTimer = null;
+  let readyCheckInterval = null;
+
+  function writeSessionConnected() {
+    const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
+    if (fs.existsSync(sesPath)) return; // ya escrito
+    const phone = client.info?.wid?.user || 'N/A';
+    console.log(`[${restauranteId}] ✅ Sesión activa detectada — phone: ${phone}`);
+    fs.writeFileSync(sesPath, JSON.stringify({ status: 'connected', phone }));
+    if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
+    if (readyCheckInterval) { clearInterval(readyCheckInterval); readyCheckInterval = null; }
+  }
+
   client.on('authenticated', () => {
     console.log(`[${restauranteId}] 🔐 Autenticado — esperando 'ready'...`);
-    // Borrar QR viejo para que el polling no lo devuelva más
     const qrPath = path.join(DATA_DIR, `qr_${restauranteId}.json`);
     if (fs.existsSync(qrPath)) fs.unlinkSync(qrPath);
+
+    // Fallback: verificar cada 5s si client.info ya está disponible
+    // (cubre el caso en que 'ready' se dispara antes de que este listener esté listo)
+    readyCheckInterval = setInterval(() => {
+      if (client.info?.wid?.user) writeSessionConnected();
+    }, 5000);
+
+    // Si ready no llega en 4 minutos, limpiar y permitir nuevo intento
+    readyTimer = setTimeout(async () => {
+      if (readyCheckInterval) { clearInterval(readyCheckInterval); readyCheckInterval = null; }
+      const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
+      if (!fs.existsSync(sesPath)) {
+        console.warn(`[${restauranteId}] ⚠️ ready no llegó tras 4min — reiniciando sesión`);
+        try { await client.destroy(); } catch(e) {}
+        delete sessions[restauranteId];
+        // Borrar credenciales de LocalAuth para forzar QR nuevo
+        const authDir = path.join(DATA_DIR, `session-${restauranteId}`);
+        if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
+      }
+    }, 240000); // 4 minutos
+  });
+
+  // Fallback adicional: change_state cubre casos donde ready no se emite
+  client.on('change_state', (s) => {
+    console.log(`[${restauranteId}] Estado WA: ${s}`);
+    if (s === 'CONNECTED') writeSessionConnected();
   });
 
   client.on('ready', () => {
-    console.log(`[${restauranteId}] ✅ WhatsApp listo`);
-    fs.writeFileSync(path.join(DATA_DIR, `session_${restauranteId}.json`), JSON.stringify({ status: 'connected', phone: client.info?.wid?.user || 'N/A' }));
+    console.log(`[${restauranteId}] ✅ WhatsApp listo (evento ready)`);
+    writeSessionConnected();
   });
 
   client.on('auth_failure', (msg) => {
