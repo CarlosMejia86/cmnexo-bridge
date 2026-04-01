@@ -83,9 +83,12 @@ async function enviarMenuNumerado(client, msg, restauranteId, from, conv) {
 }
 
 function createSession(restauranteId) {
-  if (sessions[restauranteId]) return sessions[restauranteId];
+  if (sessions[restauranteId]) {
+    console.log(`[${restauranteId}] Sesión ya existe, reutilizando`);
+    return sessions[restauranteId];
+  }
 
-  console.log(`[${restauranteId}] Preparando cliente de WhatsApp...`);
+  console.log(`[${restauranteId}] Creando nueva sesión WhatsApp...`);
 
   const client = new Client({
     authStrategy: new LocalAuth({ 
@@ -318,13 +321,17 @@ function createSession(restauranteId) {
   // message como respaldo
   client.on('message', handleMsgDedup);
 
-  console.log(`[${restauranteId}] Llamando client.initialize()...`);
-  client.initialize().then(() => {
-    console.log(`[${restauranteId}] initialize() completado`);
-  }).catch(err => {
+  sessions[restauranteId] = client;
+
+  console.log(`[${restauranteId}] Iniciando cliente WhatsApp...`);
+  client.initialize().catch(err => {
     console.error(`[${restauranteId}] FATAL initialize():`, err.message);
-    console.error(err.stack);
     delete sessions[restauranteId];
+    // Limpiar archivos para forzar QR nuevo en el próximo intento
+    const qrPath = path.join(DATA_DIR, `qr_${restauranteId}.json`);
+    const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
+    if (fs.existsSync(qrPath)) fs.unlinkSync(qrPath);
+    if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
   });
 
   sessions[restauranteId] = client;
