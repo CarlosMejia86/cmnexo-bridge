@@ -24,6 +24,65 @@ function logActivity(restauranteId, entry) {
   if (activityStore[restauranteId].length > 50) activityStore[restauranteId].pop();
 }
 
+// Estado de conversación por restaurante y teléfono
+// { [restauranteId]: { [phone]: { step, menuItems, selectedItem, cart } } }
+const convState = {};
+function getConv(restauranteId, phone) {
+  if (!convState[restauranteId]) convState[restauranteId] = {};
+  if (!convState[restauranteId][phone]) convState[restauranteId][phone] = { step: 'idle', menuItems: [], cart: [] };
+  return convState[restauranteId][phone];
+}
+function resetConv(restauranteId, phone) {
+  if (convState[restauranteId]) convState[restauranteId][phone] = { step: 'idle', menuItems: [], cart: [] };
+}
+
+const NUM_EMOJIS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
+
+async function enviarMenuNumerado(client, msg, restauranteId, from, conv) {
+  try {
+    const res = await fetch(`${API_URL}/menu/${restauranteId}`);
+    if (!res.ok) {
+      await client.sendMessage(msg.from, "📋 No pude cargar el menú ahora. Intenta en un momento.");
+      return;
+    }
+    const data = await res.json();
+    const items = (Array.isArray(data) ? data : (data.items || data.menu || [])).filter(i => i.disponible !== 0);
+    if (items.length === 0) {
+      await client.sendMessage(msg.from, "📋 El menú está vacío en este momento. Intenta más tarde.");
+      logActivity(restauranteId, { type: 'out', text: 'Bot: menú vacío' });
+      return;
+    }
+    // Agrupar por categoría
+    const categorias = {};
+    items.forEach(i => {
+      const cat = i.categoria || 'General';
+      if (!categorias[cat]) categorias[cat] = [];
+      categorias[cat].push(i);
+    });
+    // Armar lista numerada global
+    const todosOrdenados = [];
+    let texto = '📋 *Nuestro menú:*\n';
+    Object.entries(categorias).forEach(([cat, prods]) => {
+      texto += `\n🏷️ *${cat.toUpperCase()}*\n`;
+      prods.forEach(p => {
+        todosOrdenados.push(p);
+        const n = todosOrdenados.length;
+        const emoji = NUM_EMOJIS[n - 1] || `${n}.`;
+        const precio = (p.precio !== undefined && p.precio !== null) ? Number(p.precio).toLocaleString('es-CO') : '0';
+        texto += `${emoji} ${p.nombre} — *$${precio}*\n`;
+      });
+    });
+    texto += '\n_Responde con el *número* del producto que deseas pedir._\n📦 Escribe *finalizar* cuando termines.';
+    conv.menuItems = todosOrdenados;
+    conv.step = 'menu_shown';
+    await client.sendMessage(msg.from, texto);
+    logActivity(restauranteId, { type: 'out', text: `Bot envió menú (${todosOrdenados.length} items)` });
+  } catch(e) {
+    console.error(`[${restauranteId}] Error cargando menú:`, e.message);
+    await client.sendMessage(msg.from, "📋 Error al cargar el menú. Intenta de nuevo.");
+  }
+}
+
 function createSession(restauranteId) {
   if (sessions[restauranteId]) return sessions[restauranteId];
 
@@ -100,49 +159,110 @@ function createSession(restauranteId) {
 
     logActivity(restauranteId, { type: 'in', text: `${from} escribió: ${body.substring(0, 40)}` });
 
+    const conv = getConv(restauranteId, from);
+
     try {
       const bodyLower = body.toLowerCase();
-      if (bodyLower.match(/^(hola|hi|hello|buenas|buenos|buen día|buenas tardes|buenas noches|hey|ola)/)) {
-        await client.sendMessage(msg.from, "¡Hola! 👋 Soy el asistente virtual. Escribe *menú* para ver los productos disponibles.");
-        logActivity(restauranteId, { type: 'out', text: 'Bot respondió saludo' });
-      } else if (bodyLower.match(/^(menú|menu|carta|productos|ver menu|ver menú)/)) {
-        try {
-          const menuUrl = `${API_URL}/menu/${restauranteId}`;
-          console.log(`[${restauranteId}] Fetching menu: ${menuUrl}`);
-          const res = await fetch(menuUrl);
-          console.log(`[${restauranteId}] Menu response status: ${res.status}`);
-          if (res.ok) {
-            const data = await res.json();
-            const items = Array.isArray(data) ? data : (data.items || data.menu || []);
-            console.log(`[${restauranteId}] Menu items: ${items.length}`);
-            if (items.length > 0) {
-              const lines = items.slice(0, 10).map(i => {
-                const nombre = i.nombre || i.name || 'Producto';
-                const precio = (i.precio !== undefined && i.precio !== null) ? i.precio : (i.price ?? '');
-                return `• *${nombre}* — $${precio}`;
-              }).join('\n');
-              await client.sendMessage(msg.from, `📋 *Nuestro menú:*\n\n${lines}\n\nEscribe el nombre del producto para pedirlo.`);
-              logActivity(restauranteId, { type: 'out', text: 'Bot envió menú' });
-            } else {
-              await client.sendMessage(msg.from, "📋 Menú no disponible en este momento. Intenta más tarde.");
-              logActivity(restauranteId, { type: 'out', text: 'Bot: menú vacío' });
-            }
-          } else {
-            const errText = await res.text();
-            console.error(`[${restauranteId}] Menu API error ${res.status}: ${errText}`);
-            await client.sendMessage(msg.from, "📋 No pude cargar el menú en este momento. Intenta de nuevo.");
-          }
-        } catch(menuErr) {
-          console.error(`[${restauranteId}] Menu fetch error:`, menuErr.message);
-          await client.sendMessage(msg.from, "📋 Error al cargar el menú. Intenta de nuevo.");
-        }
-      } else if (bodyLower.match(/^(horario|horarios|hora|abren|cierran|atención)/)) {
-        await client.sendMessage(msg.from, "🕐 Consulta nuestros horarios directamente con el restaurante.");
+      const num = parseInt(body);
+
+      // --- SALUDO ---
+      if (bodyLower.match(/^(hola|hi|hello|buenas|buenos|buen d[ií]a|buenas tardes|buenas noches|hey|ola)\b/)) {
+        resetConv(restauranteId, from);
+        await client.sendMessage(msg.from,
+          `¡Hola! 👋 Bienvenido.\n\nEscribe una opción:\n\n` +
+          `1️⃣ Ver *menú*\n` +
+          `2️⃣ Consultar *horarios*\n` +
+          `3️⃣ Info sobre *domicilios*\n\n` +
+          `_Responde con el número o escribe directamente lo que necesitas._`
+        );
+        conv.step = 'main_menu';
+        logActivity(restauranteId, { type: 'out', text: 'Bot respondió saludo con menú principal' });
+
+      // --- MENÚ PRINCIPAL NUMÉRICO (cuando step=main_menu) ---
+      } else if (conv.step === 'main_menu' && (num === 1 || bodyLower.match(/^(men[uú]|carta|productos|ver men[uú])/))) {
+        await enviarMenuNumerado(client, msg, restauranteId, from, conv);
+
+      } else if (conv.step === 'main_menu' && (num === 2 || bodyLower.match(/^(horario|hora|abren|cierran)/))) {
+        await client.sendMessage(msg.from, "🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n_Escribe *menú* para ver productos._");
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió horario' });
-      } else if (bodyLower.match(/^(domicilio|delivery|envío|envio|despacho|llevan)/)) {
-        await client.sendMessage(msg.from, "🛵 Sí hacemos domicilios. ¿Cuál es tu dirección?");
+
+      } else if (conv.step === 'main_menu' && (num === 3 || bodyLower.match(/^(domicilio|delivery|env[ií]o|despacho|llevan)/))) {
+        await client.sendMessage(msg.from, "🛵 *Domicilios:*\n\nSí hacemos entregas a domicilio. El tiempo estimado es de 25–40 min.\n\nEscribe *menú* para hacer tu pedido. 🍔");
+        logActivity(restauranteId, { type: 'out', text: 'Bot respondió domicilio' });
+
+      // --- SOLICITUD DIRECTA DE MENÚ (cualquier momento) ---
+      } else if (bodyLower.match(/^(men[uú]|carta|productos|ver men[uú]|quiero pedir|pedido|pedir)/)) {
+        await enviarMenuNumerado(client, msg, restauranteId, from, conv);
+
+      // --- SELECCIÓN NUMÉRICA DEL MENÚ ---
+      } else if (conv.step === 'menu_shown' && !isNaN(num) && num >= 1 && num <= conv.menuItems.length) {
+        const item = conv.menuItems[num - 1];
+        const precio = (item.precio !== undefined && item.precio !== null) ? item.precio : 0;
+        conv.selectedItem = item;
+        conv.step = 'item_selected';
+        await client.sendMessage(msg.from,
+          `${NUM_EMOJIS[num-1]} *${item.nombre}*\n` +
+          (item.descripcion ? `_${item.descripcion}_\n` : '') +
+          `💰 Precio: *$${Number(precio).toLocaleString('es-CO')}*\n\n` +
+          `¿Confirmas este producto?\n\n✅ Escribe *sí* para agregar\n❌ Escribe *no* para volver al menú`
+        );
+        logActivity(restauranteId, { type: 'out', text: `Bot mostró detalle: ${item.nombre}` });
+
+      // --- CONFIRMACIÓN DEL PRODUCTO ---
+      } else if (conv.step === 'item_selected' && bodyLower.match(/^(s[ií]|yes|ok|dale|listo|confirmar|confirmo)/)) {
+        const item = conv.selectedItem;
+        const precio = (item.precio !== undefined && item.precio !== null) ? item.precio : 0;
+        conv.cart.push(item);
+        conv.step = 'collecting_order';
+        await client.sendMessage(msg.from,
+          `✅ *${item.nombre}* agregado.\n\n` +
+          `¿Deseas agregar algo más?\n\n` +
+          `📋 Escribe *menú* para seguir eligiendo\n` +
+          `📦 Escribe *finalizar* para completar tu pedido`
+        );
+        logActivity(restauranteId, { type: 'out', text: `Cliente agregó: ${item.nombre}` });
+
+      } else if (conv.step === 'item_selected' && bodyLower.match(/^(no|cancelar|volver|atr[aá]s)/)) {
+        await enviarMenuNumerado(client, msg, restauranteId, from, conv);
+
+      // --- FINALIZAR PEDIDO ---
+      } else if (bodyLower.match(/^(finalizar|terminar|listo|eso es todo|eso seria todo)/) && conv.cart.length > 0) {
+        const resumen = conv.cart.map(i => `• ${i.nombre}`).join('\n');
+        const total = conv.cart.reduce((s, i) => s + (Number(i.precio) || 0), 0);
+        conv.step = 'awaiting_address';
+        await client.sendMessage(msg.from,
+          `🛒 *Resumen de tu pedido:*\n${resumen}\n\n` +
+          `💰 Total estimado: *$${total.toLocaleString('es-CO')}*\n\n` +
+          `📍 ¿Cuál es tu dirección de entrega?\n_Escribe tu dirección para continuar o *recoger* si vas a retirar en el local._`
+        );
+        logActivity(restauranteId, { type: 'out', text: `Bot solicitó dirección. Carrito: ${conv.cart.length} items` });
+
+      // --- DIRECCIÓN DE ENTREGA ---
+      } else if (conv.step === 'awaiting_address') {
+        const direccion = body;
+        const resumen = conv.cart.map(i => i.nombre).join(', ');
+        const total = conv.cart.reduce((s, i) => s + (Number(i.precio) || 0), 0);
+        resetConv(restauranteId, from);
+        await client.sendMessage(msg.from,
+          `🎉 *¡Pedido recibido!*\n\n` +
+          `📋 ${resumen}\n` +
+          `📍 Entrega en: ${direccion}\n` +
+          `💰 Total: *$${total.toLocaleString('es-CO')}*\n\n` +
+          `⏱️ Tiempo estimado: 25–40 min\n` +
+          `Nos pondremos en contacto pronto para confirmar. ¡Gracias! 🙌`
+        );
+        logActivity(restauranteId, { type: 'out', text: `Pedido tomado: ${resumen}` });
+
+      // --- HORARIOS Y DOMICILIOS DIRECTOS ---
+      } else if (bodyLower.match(/^(horario|horarios|hora|abren|cierran|atenci[oó]n)/)) {
+        await client.sendMessage(msg.from, "🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado");
+        logActivity(restauranteId, { type: 'out', text: 'Bot respondió horario' });
+
+      } else if (bodyLower.match(/^(domicilio|delivery|env[ií]o|envio|despacho|llevan)/)) {
+        await client.sendMessage(msg.from, "🛵 Sí hacemos domicilios. Escribe *menú* para hacer tu pedido.");
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió domicilio' });
       }
+
     } catch(e) { console.error(`[${restauranteId}] Error en bot:`, e.message); }
   });
 
