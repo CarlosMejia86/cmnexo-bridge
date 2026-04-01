@@ -249,18 +249,43 @@ function createSession(restauranteId) {
       // --- DIRECCIÓN DE ENTREGA ---
       } else if (conv.step === 'awaiting_address') {
         const direccion = body;
-        const resumen = conv.cart.map(i => i.nombre).join(', ');
+        const esRecoger = /^recoger$/i.test(body.trim());
         const total = conv.cart.reduce((s, i) => s + (Number(i.precio) || 0), 0);
+        const resumenTexto = conv.cart.map(i => i.nombre).join(', ');
+        const itemsApi = conv.cart.map(i => ({ nombre: i.nombre, qty: 1, precio: Number(i.precio) || 0 }));
+
         conv.step = 'idle'; conv.menuItems = []; conv.cart = []; conv.selectedItem = null;
+
+        // Guardar pedido en la BD
+        try {
+          await fetch(`${API_URL}/pedidos`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              restaurante_id:   restauranteId,
+              cliente_telefono: from,
+              cliente_nombre:   from,
+              cliente_direccion: esRecoger ? null : direccion,
+              tipo_entrega:     esRecoger ? 'recoger' : 'domicilio',
+              items:    itemsApi,
+              subtotal: total,
+              total:    total,
+              canal:    'whatsapp',
+            })
+          });
+        } catch(pedErr) {
+          console.error(`[${restauranteId}] Error guardando pedido:`, pedErr.message);
+        }
+
         await client.sendMessage(msg.from,
           `🎉 *¡Pedido recibido!*\n\n` +
-          `📋 ${resumen}\n` +
-          `📍 Entrega en: ${direccion}\n` +
+          `📋 ${resumenTexto}\n` +
+          `📍 ${esRecoger ? 'Retiro en el local 🏃' : `Entrega en: ${direccion}`}\n` +
           `💰 Total: *$${total.toLocaleString('es-CO')}*\n\n` +
           `⏱️ Tiempo estimado: 25–40 min\n` +
           `Nos pondremos en contacto pronto para confirmar. ¡Gracias! 🙌`
         );
-        logActivity(restauranteId, { type: 'out', text: `Pedido tomado: ${resumen}` });
+        logActivity(restauranteId, { type: 'out', text: `Pedido guardado: ${resumenTexto}` });
 
       // --- HORARIOS Y DOMICILIOS DIRECTOS ---
       } else if (bodyLower.match(/^(horario|horarios|hora|abren|cierran|atenci[oó]n)/)) {
