@@ -101,16 +101,16 @@ function createSession(restauranteId) {
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-zygote',
-        '--single-process',
         '--disable-extensions',
         '--disable-background-networking',
         '--disable-default-apps',
         '--disable-sync',
         '--disable-translate',
         '--hide-scrollbars',
-        '--metrics-recording-only',
         '--mute-audio',
         '--safebrowsing-disable-auto-update',
+        '--disable-features=VizDisplayCompositor',
+        '--shm-size=128m',
       ]
     }
   });
@@ -319,8 +319,13 @@ function createSession(restauranteId) {
   // message como respaldo
   client.on('message', handleMsgDedup);
 
-  client.initialize().catch(err => {
-    console.error(`[${restauranteId}] FATAL: No se pudo iniciar el navegador:`, err.message);
+  console.log(`[${restauranteId}] Llamando client.initialize()...`);
+  client.initialize().then(() => {
+    console.log(`[${restauranteId}] initialize() completado`);
+  }).catch(err => {
+    console.error(`[${restauranteId}] FATAL initialize():`, err.message);
+    console.error(err.stack);
+    delete sessions[restauranteId];
   });
 
   sessions[restauranteId] = client;
