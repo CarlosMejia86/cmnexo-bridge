@@ -300,7 +300,22 @@ function createSession(restauranteId) {
     } catch(e) { console.error(`[${restauranteId}] Error en bot:`, e.message); }
   }
 
-  client.on('message', handleMsg);
+  // Deduplicar por ID real del mensaje para evitar doble procesamiento
+  const seenIds = new Set();
+  async function handleMsgDedup(msg) {
+    if (msg.fromMe) return;
+    const id = msg.id?._serialized;
+    if (id) {
+      if (seenIds.has(id)) return;
+      seenIds.add(id);
+      if (seenIds.size > 500) seenIds.delete(seenIds.values().next().value);
+    }
+    await handleMsg(msg);
+  }
+  // message_create es el evento principal en wwebjs v1.26+
+  client.on('message_create', handleMsgDedup);
+  // message como respaldo
+  client.on('message', handleMsgDedup);
 
   client.initialize().catch(err => {
     console.error(`[${restauranteId}] FATAL: No se pudo iniciar el navegador:`, err.message);
@@ -369,6 +384,24 @@ app.get('/session/:id/status', (req, res) => {
   if (fs.existsSync(sesPath)) return res.json(JSON.parse(fs.readFileSync(sesPath, 'utf8')));
   if (fs.existsSync(qrPath)) return res.json({ status: 'qr', ...JSON.parse(fs.readFileSync(qrPath, 'utf8')) });
   res.json({ status: sessions[id] ? 'connecting' : 'disconnected' });
+});
+
+// Enviar mensaje WA a un teléfono desde la tienda
+// POST /notify { restaurante_id, phone, message }
+app.post('/notify', async (req, res) => {
+  const { restaurante_id, phone, message } = req.body;
+  if (!restaurante_id || !phone || !message) return res.status(400).json({ error: 'Faltan datos' });
+  const client = sessions[restaurante_id];
+  if (!client) return res.status(404).json({ error: 'Sesión no activa' });
+  try {
+    const chatId = phone.replace(/[^0-9]/g, '') + '@c.us';
+    await client.sendMessage(chatId, message);
+    logActivity(restaurante_id, { type: 'out', text: `Notif → ${phone}: ${message.substring(0, 40)}` });
+    res.json({ ok: true });
+  } catch(e) {
+    console.error(`[${restaurante_id}] Error enviando notificación:`, e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
