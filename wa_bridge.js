@@ -155,9 +155,10 @@ function createSession(restauranteId) {
     if (msg.isGroupMsg) return;
     if (!msg.body) return;
     const from = msg.from.replace('@c.us', '');
-    const body = msg.body.trim();
+    // Limpiar caracteres Unicode invisibles que WhatsApp inserta
+    const body = msg.body.replace(/[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g, '').trim();
     if (!body) return;
-    console.log(`[${restauranteId}] Mensaje de ${from}: ${body.substring(0, 60)}`);
+    console.log(`[${restauranteId}] Mensaje de ${from}: ${JSON.stringify(body.substring(0, 60))}`);
 
     logActivity(restauranteId, { type: 'in', text: `${from} escribió: ${body.substring(0, 40)}` });
 
@@ -165,7 +166,10 @@ function createSession(restauranteId) {
 
     try {
       const bodyLower = body.toLowerCase();
-      const num = parseInt(body);
+      // Extraer número: buscar primer dígito en el mensaje
+      const numMatch = body.match(/^\s*(\d+)\s*$/);
+      const num = numMatch ? parseInt(numMatch[1]) : NaN;
+      console.log(`[${restauranteId}] step=${conv.step} num=${num} body=${JSON.stringify(body)}`);
 
       // --- SALUDO ---
       if (bodyLower.match(/^(hola|hi|hello|buenas|buenos|buen\s?d[ií]a|buenas tardes|buenas noches|hey|ola|buenos d[ií]as)/)) {
@@ -184,14 +188,14 @@ function createSession(restauranteId) {
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió saludo con menú principal' });
 
       // --- MENÚ PRINCIPAL NUMÉRICO (cuando step=main_menu) ---
-      } else if (conv.step === 'main_menu' && (num === 1 || bodyLower.match(/^(men[uú]|carta|productos|ver men[uú])/))) {
+      } else if (conv.step === 'main_menu' && (num === 1 || body === '1' || bodyLower.match(/^(men[uú]|carta|productos|ver men[uú])/))) {
         await enviarMenuNumerado(client, msg, restauranteId, from, conv);
 
-      } else if (conv.step === 'main_menu' && (num === 2 || bodyLower.match(/^(horario|hora|abren|cierran)/))) {
+      } else if (conv.step === 'main_menu' && (num === 2 || body === '2' || bodyLower.match(/^(horario|hora|abren|cierran)/))) {
         await client.sendMessage(msg.from, "🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n_Escribe *menú* para ver productos._");
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió horario' });
 
-      } else if (conv.step === 'main_menu' && (num === 3 || bodyLower.match(/^(domicilio|delivery|env[ií]o|despacho|llevan)/))) {
+      } else if (conv.step === 'main_menu' && (num === 3 || body === '3' || bodyLower.match(/^(domicilio|delivery|env[ií]o|despacho|llevan)/))) {
         await client.sendMessage(msg.from, "🛵 *Domicilios:*\n\nSí hacemos entregas a domicilio. El tiempo estimado es de 25–40 min.\n\nEscribe *menú* para hacer tu pedido. 🍔");
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió domicilio' });
 
@@ -200,7 +204,7 @@ function createSession(restauranteId) {
         await enviarMenuNumerado(client, msg, restauranteId, from, conv);
 
       // --- SELECCIÓN NUMÉRICA DEL MENÚ ---
-      } else if (conv.step === 'menu_shown' && !isNaN(num) && num >= 1 && num <= conv.menuItems.length) {
+      } else if (conv.step === 'menu_shown' && !isNaN(num) && num >= 1 && num <= conv.menuItems.length && conv.menuItems.length > 0) {
         const item = conv.menuItems[num - 1];
         const precio = (item.precio !== undefined && item.precio !== null) ? item.precio : 0;
         conv.selectedItem = item;
