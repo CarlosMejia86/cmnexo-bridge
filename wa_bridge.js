@@ -300,16 +300,7 @@ function createSession(restauranteId) {
     } catch(e) { console.error(`[${restauranteId}] Error en bot:`, e.message); }
   }
 
-  const processed = new Set();
-  async function handleMsgOnce(msg) {
-    const key = msg.id?._serialized || msg.id?.id || `${msg.from}-${Date.now()}`;
-    if (processed.has(key)) return;
-    processed.add(key);
-    if (processed.size > 200) { const first = processed.values().next().value; processed.delete(first); }
-    await handleMsg(msg);
-  }
-  client.on('message', handleMsgOnce);
-  client.on('message_create', handleMsgOnce);
+  client.on('message', handleMsg);
 
   client.initialize().catch(err => {
     console.error(`[${restauranteId}] FATAL: No se pudo iniciar el navegador:`, err.message);
