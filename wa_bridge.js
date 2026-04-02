@@ -274,35 +274,47 @@ app.post('/session/start', (req, res) => {
   const { restaurante_id } = req.body;
   if (!restaurante_id) return res.status(400).json({ error: 'Falta restaurante_id' });
   console.log(`[${restaurante_id}] Petición de inicio de sesión recibida`);
+  manuallyDisconnected.delete(restaurante_id); // ya no es desconexión manual
   createSession(restaurante_id);
   res.json({ status: 'starting', message: 'Iniciando cliente de WhatsApp...' });
 });
 
+// Set de IDs desconectados manualmente — el heartbeat no los reconecta
+const manuallyDisconnected = new Set();
+
 app.post('/session/:id/disconnect', async (req, res) => {
   const id = req.params.id;
-  console.log(`[${id}] Desconectando sesión...`);
+  console.log(`[${id}] Desconectando sesión completamente...`);
+
+  // Marcar como desconectado manual ANTES de todo (evita que heartbeat reconecte)
+  manuallyDisconnected.add(id);
+
+  // Borrar archivos primero para que writeSessionConnected no los recree
+  const filesToDelete = [
+    path.join(DATA_DIR, `session_${id}.json`),
+    path.join(DATA_DIR, `qr_${id}.json`),
+  ];
+  filesToDelete.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
+
+  // Borrar carpeta LocalAuth (credenciales — fuerza QR nuevo)
+  const authDir = path.join(DATA_DIR, `session-${id}`);
+  try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
+
+  // Destruir cliente si existe
   try {
     if (sessions[id]) {
       await sessions[id].logout().catch(() => {});
       await sessions[id].destroy().catch(() => {});
       delete sessions[id];
     }
-    // Borrar archivos de sesión y QR
-    const filesToDelete = [
-      path.join(DATA_DIR, `session_${id}.json`),
-      path.join(DATA_DIR, `qr_${id}.json`),
-    ];
-    filesToDelete.forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
-    // Borrar carpeta de LocalAuth (credenciales guardadas)
-    const authDir = path.join(DATA_DIR, `session-${id}`);
-    if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
-    delete activityStore[id];
-    console.log(`[${id}] Sesión destruida`);
-    res.json({ status: 'disconnected' });
   } catch(e) {
-    console.error(`[${id}] Error al desconectar:`, e.message);
-    res.json({ status: 'disconnected', note: e.message });
+    console.error(`[${id}] Error destruyendo cliente:`, e.message);
   }
+
+  delete activityStore[id];
+  delete restaurantNames[id];
+  console.log(`[${id}] ✅ Sesión destruida completamente — se pedirá QR nuevo`);
+  res.json({ status: 'disconnected' });
 });
 
 app.get('/session/:id/activity', (req, res) => {
@@ -345,14 +357,15 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`📡 Esperando peticiones API...\n`);
 });
 
-// ── Heartbeat: cada 5 min restaura sesiones caídas ────────────
+// ── Heartbeat: cada 5 min restaura sesiones caídas (no las desconectadas manualmente) ───
 setInterval(() => {
   const sesFiles = fs.readdirSync(DATA_DIR).filter(f => f.startsWith('session_') && f.endsWith('.json'));
   sesFiles.forEach(file => {
     const restauranteId = file.replace('session_', '').replace('.json', '');
+    if (manuallyDisconnected.has(restauranteId)) return; // desconectado por el usuario — no reconectar
     if (!sessions[restauranteId]) {
-      console.log(`[heartbeat] Sesión persistida sin cliente activo — reconectando ${restauranteId}`);
+      console.log(`[heartbeat] Reconectando sesión caída: ${restauranteId}`);
       createSession(restauranteId);
     }
   });
-}, 5 * 60 * 1000); // cada 5 minutos
+}, 5 * 60 * 1000);
