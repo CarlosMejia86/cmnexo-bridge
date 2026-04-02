@@ -30,6 +30,11 @@ function logActivity(restauranteId, entry) {
 // Caché de nombres de restaurante { [restauranteId]: 'Nombre' }
 const restaurantNames = {};
 
+// Watchdog: timestamp del último mensaje recibido por sesión
+const lastMsgTs = {};
+// Watchdog timers por sesión
+const watchdogTimers = {};
+
 function createSession(restauranteId) {
   if (sessions[restauranteId]) {
     console.log(`[${restauranteId}] Sesión ya existe, reutilizando`);
@@ -123,7 +128,8 @@ function createSession(restauranteId) {
   client.on('ready', () => {
     console.log(`[${restauranteId}] ✅ WhatsApp listo (evento ready)`);
     writeSessionConnected();
-    // Cargar nombre del restaurante para usarlo en los mensajes del bot
+
+    // Cargar nombre del restaurante
     fetch(`${API_URL}/tienda?r=${restauranteId}`)
       .then(r => r.json())
       .then(data => {
@@ -133,6 +139,37 @@ function createSession(restauranteId) {
         }
       })
       .catch(() => {});
+
+    // Iniciar watchdog: verifica cada 3 min que el cliente sigue activo
+    lastMsgTs[restauranteId] = Date.now();
+    if (watchdogTimers[restauranteId]) clearInterval(watchdogTimers[restauranteId]);
+    watchdogTimers[restauranteId] = setInterval(async () => {
+      try {
+        const state = await client.getState();
+        console.log(`[${restauranteId}] [watchdog] estado=${state}`);
+        if (state !== 'CONNECTED') {
+          console.warn(`[${restauranteId}] [watchdog] ⚠️ Estado no CONNECTED (${state}) — reconectando`);
+          clearInterval(watchdogTimers[restauranteId]);
+          try { await client.destroy(); } catch(e) {}
+          delete sessions[restauranteId];
+          const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
+          if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
+          if (!manuallyDisconnected.has(restauranteId)) {
+            setTimeout(() => createSession(restauranteId), 3000);
+          }
+        }
+      } catch(e) {
+        console.warn(`[${restauranteId}] [watchdog] ❌ getState() falló: ${e.message} — reconectando`);
+        clearInterval(watchdogTimers[restauranteId]);
+        try { await client.destroy(); } catch(e2) {}
+        delete sessions[restauranteId];
+        const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
+        if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
+        if (!manuallyDisconnected.has(restauranteId)) {
+          setTimeout(() => createSession(restauranteId), 5000);
+        }
+      }
+    }, 3 * 60 * 1000); // cada 3 minutos
   });
 
   client.on('auth_failure', (msg) => {
@@ -146,6 +183,7 @@ function createSession(restauranteId) {
 
   client.on('disconnected', (reason) => {
     console.log(`[${restauranteId}] Desconectado: ${reason}`);
+    if (watchdogTimers[restauranteId]) { clearInterval(watchdogTimers[restauranteId]); delete watchdogTimers[restauranteId]; }
     const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
     if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
     delete sessions[restauranteId];
@@ -311,8 +349,10 @@ app.post('/session/:id/disconnect', async (req, res) => {
     console.error(`[${id}] Error destruyendo cliente:`, e.message);
   }
 
+  if (watchdogTimers[id]) { clearInterval(watchdogTimers[id]); delete watchdogTimers[id]; }
   delete activityStore[id];
   delete restaurantNames[id];
+  delete lastMsgTs[id];
   console.log(`[${id}] ✅ Sesión destruida completamente — se pedirá QR nuevo`);
   res.json({ status: 'disconnected' });
 });
