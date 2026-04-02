@@ -197,30 +197,27 @@ function createSession(restauranteId) {
     const restName  = restaurantNames[restauranteId] || 'nuestro restaurante';
     const bl        = body.toLowerCase();
 
+    const chatId = msg.from.includes('@') ? msg.from : `${msg.from}@c.us`;
+    console.log(`[${restauranteId}] Respondiendo a chatId=${chatId}`);
+
     try {
+      let texto;
       if (bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/)) {
-        await client.sendMessage(msg.from,
-          `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n` +
-          `👉 Haz tu pedido aquí:\n${storeLink}`
-        );
+        texto = `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n👉 Haz tu pedido aquí:\n${storeLink}`;
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió horario' });
-
       } else if (bl.match(/domicilio|delivery|env[ií]o|despacho|llevan/)) {
-        await client.sendMessage(msg.from,
-          `🛵 Sí hacemos domicilios. Tiempo estimado: 25–40 min.\n\n` +
-          `👉 Haz tu pedido aquí:\n${storeLink}`
-        );
+        texto = `🛵 Sí hacemos domicilios. Tiempo estimado: 25–40 min.\n\n👉 Haz tu pedido aquí:\n${storeLink}`;
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió domicilio + link' });
-
       } else {
-        await client.sendMessage(msg.from,
-          `¡Hola! 👋 Bienvenido a *${restName}*.\n\n` +
-          `🛒 Haz tu pedido aquí:\n${storeLink}\n\n` +
-          `Selecciona tus productos, elige adiciones y confirma en segundos. 😊`
-        );
+        texto = `¡Hola! 👋 Bienvenido a *${restName}*.\n\n🛒 Haz tu pedido aquí:\n${storeLink}\n\nSelecciona tus productos, elige adiciones y confirma en segundos. 😊`;
         logActivity(restauranteId, { type: 'out', text: 'Bot envió link de tienda' });
       }
-    } catch(e) { console.error(`[${restauranteId}] Error en bot:`, e.message); }
+
+      const sent = await client.sendMessage(chatId, texto);
+      console.log(`[${restauranteId}] ✅ Mensaje enviado id=${sent?.id?._serialized || sent?.id}`);
+    } catch(e) {
+      console.error(`[${restauranteId}] ❌ Error sendMessage:`, e.message, e.stack?.split('\n')[1]);
+    }
   }
 
   // Deduplicar por ID real del mensaje para evitar doble procesamiento
