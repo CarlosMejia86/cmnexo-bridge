@@ -176,10 +176,19 @@ function createSession(restauranteId) {
     if (msg.fromMe) return;
     if (msg.from.endsWith('@g.us')) return;
     if (msg.isGroupMsg) return;
-    if (!msg.body) return;
+
+    // msg.body puede estar vacío en algunas versiones de WA Web — usar _data como fallback
+    const rawBody = msg.body || msg._data?.body || msg._data?.caption || '';
     const from = msg.from.replace('@c.us', '');
-    const body = msg.body.replace(/[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g, '').trim();
-    if (!body) return;
+    const body = rawBody.replace(/[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g, '').trim();
+
+    console.log(`[${restauranteId}] msg from=${from} type=${msg.type} body=${JSON.stringify(body.substring(0,50))}`);
+
+    // Solo responder a mensajes de texto
+    if (!body) {
+      console.log(`[${restauranteId}] Ignorando msg sin texto (type=${msg.type})`);
+      return;
+    }
 
     console.log(`[${restauranteId}] Mensaje de ${from}: ${JSON.stringify(body.substring(0, 60))}`);
     logActivity(restauranteId, { type: 'in', text: `${from}: ${body.substring(0, 40)}` });
@@ -226,14 +235,8 @@ function createSession(restauranteId) {
     }
     await handleMsg(msg);
   }
-  client.on('message_create', (msg) => {
-    console.log(`[${restauranteId}] message_create fromMe=${msg.fromMe} body=${JSON.stringify((msg.body||'').substring(0,40))}`);
-    handleMsgDedup(msg);
-  });
-  client.on('message', (msg) => {
-    console.log(`[${restauranteId}] message fromMe=${msg.fromMe} body=${JSON.stringify((msg.body||'').substring(0,40))}`);
-    handleMsgDedup(msg);
-  });
+  client.on('message_create', handleMsgDedup);
+  client.on('message', handleMsgDedup);
 
   sessions[restauranteId] = client;
 
