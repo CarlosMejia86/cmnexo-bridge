@@ -7,7 +7,7 @@
     "start": "node wa_bridge.js"
   },
   "dependencies": {
-    "whatsapp-web.js": "^1.26.0",
+    "whatsapp-web.js": "github:pedroslopez/whatsapp-web.js#4d2d452",
     "qrcode": "^1.5.3",
     "express": "^4.18.2",
     "cors": "^2.8.5"
