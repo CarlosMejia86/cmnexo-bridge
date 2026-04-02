@@ -58,15 +58,13 @@ function createSession(restauranteId) {
         '--disable-gpu',
         '--no-zygote',
         '--disable-extensions',
+        '--disable-background-networking',
         '--disable-default-apps',
         '--disable-sync',
         '--disable-translate',
         '--hide-scrollbars',
         '--mute-audio',
         '--safebrowsing-disable-auto-update',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding'
       ]
     }
   });
