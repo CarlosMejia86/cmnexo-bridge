@@ -315,17 +315,6 @@ app.post('/session/:id/disconnect', async (req, res) => {
   // Marcar como desconectado manual ANTES de todo (evita que heartbeat reconecte)
   manuallyDisconnected.add(id);
 
-  // Borrar archivos primero para que writeSessionConnected no los recree
-  const filesToDelete = [
-    path.join(DATA_DIR, `session_${id}.json`),
-    path.join(DATA_DIR, `qr_${id}.json`),
-  ];
-  filesToDelete.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
-
-  // Borrar carpeta LocalAuth (credenciales — fuerza QR nuevo)
-  const authDir = path.join(DATA_DIR, `session-${id}`);
-  try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
-
   // Destruir cliente si existe
   try {
     if (sessions[id]) {
@@ -336,6 +325,18 @@ app.post('/session/:id/disconnect', async (req, res) => {
   } catch(e) {
     console.error(`[${id}] Error destruyendo cliente:`, e.message);
   }
+
+  // Borrar archivos de sesión DESPUES de destruir el cliente
+  // (Para evitar que eventos como "change_state" los recreen en el limbo)
+  const filesToDelete = [
+    path.join(DATA_DIR, `session_${id}.json`),
+    path.join(DATA_DIR, `qr_${id}.json`),
+  ];
+  filesToDelete.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
+
+  // Borrar carpeta LocalAuth (credenciales — fuerza QR nuevo)
+  const authDir = path.join(DATA_DIR, `session-${id}`);
+  try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
 
   if (watchdogTimers[id]) { clearInterval(watchdogTimers[id]); delete watchdogTimers[id]; }
   delete activityStore[id];
