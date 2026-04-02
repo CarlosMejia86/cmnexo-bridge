@@ -43,11 +43,6 @@ function createSession(restauranteId) {
       clientId: restauranteId,
       dataPath: DATA_DIR
     }),
-    webVersion: '2.3000.1014901345',
-    webVersionCache: {
-      type: 'remote',
-      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
-    },
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
@@ -177,17 +172,29 @@ function createSession(restauranteId) {
     if (msg.from.endsWith('@g.us')) return;
     if (msg.isGroupMsg) return;
 
-    // msg.body puede estar vacío en algunas versiones de WA Web — usar _data como fallback
-    const rawBody = msg.body || msg._data?.body || msg._data?.caption || '';
     const from = msg.from.replace('@c.us', '');
+
+    // Extraer texto del mensaje — WA Web varía según versión y tipo
+    const rawBody = (
+      msg.body ||
+      msg._data?.body ||
+      msg._data?.caption ||
+      msg._data?.text ||
+      (msg.hasQuotedMsg ? '' : '') ||
+      ''
+    );
     const body = rawBody.replace(/[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g, '').trim();
 
     console.log(`[${restauranteId}] msg from=${from} type=${msg.type} body=${JSON.stringify(body.substring(0,50))}`);
 
-    // Solo responder a mensajes de texto
+    // Ignorar mensajes sin texto (audios, imágenes, etc.) pero responder con el link
     if (!body) {
-      console.log(`[${restauranteId}] Ignorando msg sin texto (type=${msg.type})`);
-      return;
+      if (msg.type === 'chat' || msg.type === 'text') {
+        // Mensaje de texto pero sin cuerpo detectado — responder igual
+      } else {
+        console.log(`[${restauranteId}] Ignorando msg tipo=${msg.type} sin texto`);
+        return;
+      }
     }
 
     console.log(`[${restauranteId}] Mensaje de ${from}: ${JSON.stringify(body.substring(0, 60))}`);
