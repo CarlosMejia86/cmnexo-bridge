@@ -265,22 +265,10 @@ function createSession(restauranteId) {
     }
   }
 
-  // Deduplicar: message y message_create pueden dispararse para el mismo mensaje
-  const seenIds = new Set();
-  async function handleMsgDedup(msg) {
-    if (msg.fromMe) return;
-    const id = msg.id?._serialized || msg.id?.id || null;
-    if (id) {
-      if (seenIds.has(id)) return; // duplicado — ignorar
-      seenIds.add(id);
-      if (seenIds.size > 200) seenIds.delete(seenIds.values().next().value);
-    }
-    await handleMsg(msg);
-  }
-  // Usar solo message_create (más completo en wwebjs reciente)
-  // message como respaldo por si message_create no llega
-  client.on('message_create', handleMsgDedup);
-  client.on('message', handleMsgDedup);
+  // Solo 'message' — sin deduplicación que bloquee mensajes legítimos
+  client.on('message', async (msg) => {
+    try { await handleMsg(msg); } catch(e) { console.error(`[${restauranteId}] Error handleMsg:`, e.message); }
+  });
 
   sessions[restauranteId] = client;
 
