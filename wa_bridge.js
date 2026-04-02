@@ -43,6 +43,11 @@ function createSession(restauranteId) {
       clientId: restauranteId,
       dataPath: DATA_DIR
     }),
+    webVersion: '2.3000.1014901345',
+    webVersionCache: {
+      type: 'remote',
+      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
+    },
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
@@ -221,10 +226,14 @@ function createSession(restauranteId) {
     }
     await handleMsg(msg);
   }
-  // message_create es el evento principal en wwebjs v1.26+
-  client.on('message_create', handleMsgDedup);
-  // message como respaldo
-  client.on('message', handleMsgDedup);
+  client.on('message_create', (msg) => {
+    console.log(`[${restauranteId}] message_create fromMe=${msg.fromMe} body=${JSON.stringify((msg.body||'').substring(0,40))}`);
+    handleMsgDedup(msg);
+  });
+  client.on('message', (msg) => {
+    console.log(`[${restauranteId}] message fromMe=${msg.fromMe} body=${JSON.stringify((msg.body||'').substring(0,40))}`);
+    handleMsgDedup(msg);
+  });
 
   sessions[restauranteId] = client;
 
