@@ -138,13 +138,32 @@ function createSession(restauranteId) {
   client.on('auth_failure', (msg) => {
     console.error(`[${restauranteId}] ❌ Auth fallida:`, msg);
     delete sessions[restauranteId];
+    // Auth failure = credenciales inválidas, no reintentar automáticamente
+    // El usuario deberá reconectar escaneando QR nuevo
+    const authDir = path.join(DATA_DIR, `session-${restauranteId}`);
+    if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
   });
 
   client.on('disconnected', (reason) => {
-    console.log(`[${restauranteId}] Desconectado:`, reason);
+    console.log(`[${restauranteId}] Desconectado: ${reason}`);
     const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
     if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
     delete sessions[restauranteId];
+
+    // Auto-reconexión solo para desconexiones de red (no logout intencional)
+    const noReconnect = ['LOGOUT', 'CONFLICT'];
+    if (noReconnect.includes(reason)) {
+      console.log(`[${restauranteId}] Logout intencional — no reconectar`);
+      return;
+    }
+
+    console.log(`[${restauranteId}] 🔄 Reconectando en 10s...`);
+    setTimeout(() => {
+      if (!sessions[restauranteId]) {
+        console.log(`[${restauranteId}] 🔄 Iniciando reconexión automática`);
+        createSession(restauranteId);
+      }
+    }, 10000);
   });
 
   async function handleMsg(msg) {
@@ -307,3 +326,15 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 Servidor Express vivo en puerto ${PORT}`);
   console.log(`📡 Esperando peticiones API...\n`);
 });
+
+// ── Heartbeat: cada 5 min restaura sesiones caídas ────────────
+setInterval(() => {
+  const sesFiles = fs.readdirSync(DATA_DIR).filter(f => f.startsWith('session_') && f.endsWith('.json'));
+  sesFiles.forEach(file => {
+    const restauranteId = file.replace('session_', '').replace('.json', '');
+    if (!sessions[restauranteId]) {
+      console.log(`[heartbeat] Sesión persistida sin cliente activo — reconectando ${restauranteId}`);
+      createSession(restauranteId);
+    }
+  });
+}, 5 * 60 * 1000); // cada 5 minutos
