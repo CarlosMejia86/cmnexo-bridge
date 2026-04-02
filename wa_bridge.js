@@ -10,8 +10,8 @@ app.use(cors());
 app.use(express.json());
 
 const PORT      = process.env.PORT      || 3000;
-const API_URL   = process.env.API_URL   || 'https://mediumslateblue-hippopotamus-819647.hostingersite.com/api';
-const STORE_URL = process.env.STORE_URL || API_URL.replace('/api', '');
+const API_URL   = process.env.API_URL   || 'https://cmnexo.com/api';
+const STORE_URL = process.env.STORE_URL || 'https://cmnexo.com';
 
 console.log('=== CMNexo WA Bridge v1.2.0 iniciando ===');
 
