@@ -273,13 +273,22 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] Mensaje de ${from}: ${JSON.stringify(body.substring(0, 60))}`);
     logActivity(restauranteId, { type: 'in', text: `${from}: ${body.substring(0, 40)}` });
 
-    const activeSlug = restaurantSlugs[restauranteId] || restauranteId;
-    const storeLink = `${STORE_URL}/${activeSlug}`;
+    const pref = restaurantLinkPrefs[restauranteId] || 'id';
+    const slug = restaurantSlugs[restauranteId];
+    
+    // Link seguro (predeterminado)
+    const safeLink = `${STORE_URL}/tienda.html?r=${restauranteId}`;
+    // Link con slug (amigable)
+    const slugLink = slug ? `${STORE_URL}/${slug}` : safeLink;
+    
+    // Decidir cuál enviar según preferencia del usuario
+    const storeLink = (pref === 'slug' && slug) ? slugLink : safeLink;
+
     const restName  = restaurantNames[restauranteId] || 'nuestro restaurante';
     const bl        = body.toLowerCase();
 
     const chatId = msg.from.includes('@') ? msg.from : `${msg.from}@c.us`;
-    console.log(`[${restauranteId}] Respondiendo a chatId=${chatId}`);
+    console.log(`[${restauranteId}] Respondiendo a chatId=${chatId} | Link: ${storeLink}`);
 
     // --- VALIDACIÓN DE HORARIO ---
     const isAskingForHours = bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/);
