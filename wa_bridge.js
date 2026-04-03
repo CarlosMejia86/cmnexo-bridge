@@ -130,17 +130,22 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] ✅ WhatsApp listo (evento ready)`);
     writeSessionConnected();
 
-    // Cargar nombre del restaurante
-    fetch(`${API_URL}/tienda?r=${restauranteId}`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.restaurante?.nombre) {
-          restaurantNames[restauranteId] = data.restaurante.nombre;
-          restaurantSlugs[restauranteId] = data.restaurante.slug || restauranteId;
-          console.log(`[${restauranteId}] Nombre cargado: ${data.restaurante.nombre} (Slug: ${restaurantSlugs[restauranteId]})`);
-        }
-      })
-      .catch(() => {});
+    // Cargar nombre del restaurante y slug periódicamente para reflejar cambios en el panel
+    const syncInfo = () => {
+      fetch(`${API_URL}/tienda?r=${restauranteId}`)
+        .then(r => r.json())
+        .then(data => {
+            restaurantNames[restauranteId] = data.restaurante.nombre;
+            restaurantSlugs[restauranteId] = data.restaurante.slug || null;
+            restaurantLinkPrefs[restauranteId] = data.restaurante.link_preferido || 'slug';
+            console.log(`[${restauranteId}] Información sincronizada: ${data.restaurante.nombre} (Slug: ${restaurantSlugs[restauranteId]}, Pref: ${restaurantLinkPrefs[restauranteId]})`);
+        })
+        .catch(err => console.warn(`[${restauranteId}] Error sincronizando info: ${err.message}`));
+    };
+
+    syncInfo();
+    // Resincronizar cada 15 minutos por si el usuario cambia el nombre en el panel
+    setInterval(syncInfo, 15 * 60 * 1000);
 
     // Iniciar watchdog: verifica cada 3 min que el cliente sigue activo
     lastMsgTs[restauranteId] = Date.now();
@@ -259,14 +264,22 @@ function createSession(restauranteId) {
 
     try {
       let texto;
+      // Determinar el link final según la preferencia del usuario (Slug vs ID Seguro)
+      const pref    = restaurantLinkPrefs[restauranteId] || 'slug';
+      const slug    = restaurantSlugs[restauranteId];
+      const safeLink= `${STORE_URL}/tienda.html?r=${restauranteId}`;
+      const slugLink= slug ? `${STORE_URL}/${slug}` : safeLink;
+      
+      const finalLink = (pref === 'slug' && slug) ? slugLink : safeLink;
+
       if (bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/)) {
-        texto = `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n👉 Haz tu pedido aquí:\n${storeLink}`;
+        texto = `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n👉 Haz tu pedido aquí:\n${finalLink}`;
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió horario' });
       } else if (bl.match(/domicilio|delivery|env[ií]o|despacho|llevan/)) {
-        texto = `🛵 Sí hacemos domicilios. Tiempo estimado: 25–40 min.\n\n👉 Haz tu pedido aquí:\n${storeLink}`;
+        texto = `🛵 Sí hacemos domicilios. Tiempo estimado: 25–40 min.\n\n👉 Haz tu pedido aquí:\n${finalLink}`;
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió domicilio + link' });
       } else {
-        texto = `¡Hola! 👋 Bienvenido a *${restName}*.\n\n🛒 Haz tu pedido aquí:\n${storeLink}\n\nSelecciona tus productos, elige adiciones y confirma en segundos. 😊`;
+        texto = `¡Hola! 👋 Bienvenido a *${restName}*.\n\n🛒 Haz tu pedido aquí:\n${finalLink}\n\nSelecciona tus productos, elige adiciones y confirma en segundos. 😊`;
         logActivity(restauranteId, { type: 'out', text: 'Bot envió link de tienda' });
       }
 
