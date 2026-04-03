@@ -41,8 +41,16 @@ const watchdogTimers = {};
 
 function createSession(restauranteId) {
   if (sessions[restauranteId]) {
-    console.log(`[${restauranteId}] Sesión ya existe, reutilizando`);
-    return sessions[restauranteId];
+    // Reutilizar solo si el cliente ya está inicializado y conectado
+    const existing = sessions[restauranteId];
+    if (existing.info && existing.info.wid) {
+      console.log(`[${restauranteId}] Sesión ya conectada, reutilizando`);
+      return existing;
+    }
+    // Sesión en estado desconocido — limpiar y crear de nuevo
+    console.log(`[${restauranteId}] Sesión en estado indeterminado — reemplazando`);
+    delete sessions[restauranteId];
+    existing.destroy().catch(() => {});
   }
 
   console.log(`[${restauranteId}] Creando nueva sesión WhatsApp...`);
@@ -356,11 +364,21 @@ app.get('/', (req, res) => res.json({
 
 app.get('/health', (req, res) => res.status(200).json({ status: 'OK', uptime: process.uptime() }));
 
-app.post('/session/start', (req, res) => {
+app.post('/session/start', async (req, res) => {
   const { restaurante_id } = req.body;
   if (!restaurante_id) return res.status(400).json({ error: 'Falta restaurante_id' });
   console.log(`[${restaurante_id}] Petición de inicio de sesión recibida`);
-  clearManuallyDisconnected(restaurante_id); // ya no es desconexión manual
+
+  // Si hay sesión activa en memoria, destruirla primero para forzar QR limpio
+  if (sessions[restaurante_id]) {
+    console.log(`[${restaurante_id}] Sesión existente detectada — destruyendo antes de iniciar`);
+    const old = sessions[restaurante_id];
+    delete sessions[restaurante_id];
+    try { await old.logout(); } catch(e) {}
+    try { await old.destroy(); } catch(e) {}
+  }
+
+  clearManuallyDisconnected(restaurante_id);
   createSession(restaurante_id);
   res.json({ status: 'starting', message: 'Iniciando cliente de WhatsApp...' });
 });
@@ -394,30 +412,32 @@ app.post('/session/:id/disconnect', async (req, res) => {
   // Marcar como desconectado manual ANTES de todo (evita que heartbeat reconecte)
   markManuallyDisconnected(id);
 
-  // Destruir cliente si existe
-  try {
-    if (sessions[id]) {
-      await sessions[id].logout().catch(() => {});
-      await sessions[id].destroy().catch(() => {});
-      delete sessions[id];
-    }
-  } catch(e) {
-    console.error(`[${id}] Error destruyendo cliente:`, e.message);
+  // Parar watchdog inmediatamente
+  if (watchdogTimers[id]) { clearInterval(watchdogTimers[id]); delete watchdogTimers[id]; }
+
+  // Destruir cliente si existe — siempre eliminar de sessions[]
+  const client = sessions[id];
+  delete sessions[id]; // eliminar ANTES de destroy para que eventos no lo recreen
+  if (client) {
+    try { await client.logout(); } catch(e) {}
+    try { await client.destroy(); } catch(e) {}
   }
 
-  // Borrar archivos de sesión DESPUES de destruir el cliente
-  // (Para evitar que eventos como "change_state" los recreen en el limbo)
-  const filesToDelete = [
+  // Esperar un momento para que el cliente libere archivos
+  await new Promise(r => setTimeout(r, 800));
+
+  // Borrar archivos de sesión y QR
+  [
     path.join(DATA_DIR, `session_${id}.json`),
     path.join(DATA_DIR, `qr_${id}.json`),
-  ];
-  filesToDelete.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
+  ].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
 
-  // Borrar carpeta LocalAuth (credenciales — fuerza QR nuevo)
+  // Borrar carpeta LocalAuth (credenciales — fuerza QR nuevo obligatorio)
   const authDir = path.join(DATA_DIR, `session-${id}`);
-  try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
+  try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {
+    console.error(`[${id}] Error borrando authDir:`, e.message);
+  }
 
-  if (watchdogTimers[id]) { clearInterval(watchdogTimers[id]); delete watchdogTimers[id]; }
   delete activityStore[id];
   delete restaurantNames[id];
   delete restaurantSlugs[id];
