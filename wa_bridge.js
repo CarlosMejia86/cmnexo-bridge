@@ -135,10 +135,14 @@ function createSession(restauranteId) {
       fetch(`${API_URL}/tienda?r=${restauranteId}`)
         .then(r => r.json())
         .then(data => {
+          if (data && data.restaurante) {
             restaurantNames[restauranteId] = data.restaurante.nombre;
             restaurantSlugs[restauranteId] = data.restaurante.slug || null;
             restaurantLinkPrefs[restauranteId] = data.restaurante.link_preferido || 'slug';
             console.log(`[${restauranteId}] Información sincronizada: ${data.restaurante.nombre} (Slug: ${restaurantSlugs[restauranteId]}, Pref: ${restaurantLinkPrefs[restauranteId]})`);
+          } else {
+            console.warn(`[${restauranteId}] Sincronización: La API no devolvió datos del restaurante esperado.`);
+          }
         })
         .catch(err => console.warn(`[${restauranteId}] Error sincronizando info: ${err.message}`));
     };
@@ -280,11 +284,13 @@ function createSession(restauranteId) {
         logActivity(restauranteId, { type: 'out', text: 'Bot respondió domicilio + link' });
       } else {
         texto = `¡Hola! 👋 Bienvenido a *${restName}*.\n\n🛒 Haz tu pedido aquí:\n${finalLink}\n\nSelecciona tus productos, elige adiciones y confirma en segundos. 😊`;
-        logActivity(restauranteId, { type: 'out', text: 'Bot envió link de tienda' });
+        logActivity(restauranteId, { type: 'out', text: `Saludo + Link Enviado (${restName})` });
       }
 
-      const sent = await client.sendMessage(chatId, texto);
-      console.log(`[${restauranteId}] ✅ Mensaje enviado id=${sent?.id?._serialized || sent?.id}`);
+      if (texto) {
+        await client.sendMessage(chatId, texto);
+        console.log(`[${restauranteId}] ✅ Mensaje enviado correctamente a ${from}`);
+      }
     } catch(e) {
       console.error(`[${restauranteId}] ❌ Error sendMessage:`, e.message, e.stack?.split('\n')[1]);
     }
