@@ -27,8 +27,9 @@ function logActivity(restauranteId, entry) {
   if (activityStore[restauranteId].length > 50) activityStore[restauranteId].pop();
 }
 
-// Caché de nombres de restaurante { [restauranteId]: 'Nombre' }
+// Caché de nombres y slugs de restaurante { [restauranteId]: 'String' }
 const restaurantNames = {};
+const restaurantSlugs = {};
 
 // Watchdog: timestamp del último mensaje recibido por sesión
 const lastMsgTs = {};
@@ -135,7 +136,8 @@ function createSession(restauranteId) {
       .then(data => {
         if (data.restaurante?.nombre) {
           restaurantNames[restauranteId] = data.restaurante.nombre;
-          console.log(`[${restauranteId}] Nombre cargado: ${data.restaurante.nombre}`);
+          restaurantSlugs[restauranteId] = data.restaurante.slug || restauranteId;
+          console.log(`[${restauranteId}] Nombre cargado: ${data.restaurante.nombre} (Slug: ${restaurantSlugs[restauranteId]})`);
         }
       })
       .catch(() => {});
@@ -238,7 +240,8 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] Mensaje de ${from}: ${JSON.stringify(body.substring(0, 60))}`);
     logActivity(restauranteId, { type: 'in', text: `${from}: ${body.substring(0, 40)}` });
 
-    const storeLink = `${STORE_URL}/tienda.html?r=${restauranteId}`;
+    const activeSlug = restaurantSlugs[restauranteId] || restauranteId;
+    const storeLink = `${STORE_URL}/${activeSlug}`;
     const restName  = restaurantNames[restauranteId] || 'nuestro restaurante';
     const bl        = body.toLowerCase();
 
@@ -341,6 +344,7 @@ app.post('/session/:id/disconnect', async (req, res) => {
   if (watchdogTimers[id]) { clearInterval(watchdogTimers[id]); delete watchdogTimers[id]; }
   delete activityStore[id];
   delete restaurantNames[id];
+  delete restaurantSlugs[id];
   delete lastMsgTs[id];
   console.log(`[${id}] ✅ Sesión destruida completamente — se pedirá QR nuevo`);
   res.json({ status: 'disconnected' });
