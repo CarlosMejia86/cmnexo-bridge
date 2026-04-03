@@ -365,17 +365,23 @@ app.get('/', (req, res) => res.json({
 app.get('/health', (req, res) => res.status(200).json({ status: 'OK', uptime: process.uptime() }));
 
 app.post('/session/start', async (req, res) => {
-  const { restaurante_id } = req.body;
+  const { restaurante_id, force_fresh } = req.body;
   if (!restaurante_id) return res.status(400).json({ error: 'Falta restaurante_id' });
-  console.log(`[${restaurante_id}] Petición de inicio de sesión recibida`);
-
-  // Si hay sesión activa en memoria, destruirla primero para forzar QR limpio
-  if (sessions[restaurante_id]) {
-    console.log(`[${restaurante_id}] Sesión existente detectada — destruyendo antes de iniciar`);
+  console.log(`[${restaurante_id}] Petición de inicio de sesión recibida (force_fresh=${force_fresh})`);
+  
+  // Si se pide inicio limpio o si ya hay sesión, destruir rastros
+  if (force_fresh || sessions[restaurante_id]) {
     const old = sessions[restaurante_id];
     delete sessions[restaurante_id];
-    try { await old.logout(); } catch(e) {}
-    try { await old.destroy(); } catch(e) {}
+    if (old) {
+      try { await old.logout(); } catch(e) {}
+      try { await old.destroy(); } catch(e) {}
+    }
+    // Borrar carpeta de sesión inmediatamente
+    const authDir = path.join(DATA_DIR, `session-${restaurante_id}`);
+    if (fs.existsSync(authDir)) {
+      try { fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
+    }
   }
 
   clearManuallyDisconnected(restaurante_id);
@@ -417,14 +423,19 @@ app.post('/session/:id/disconnect', async (req, res) => {
 
   // Destruir cliente si existe — siempre eliminar de sessions[]
   const client = sessions[id];
-  delete sessions[id]; // eliminar ANTES de destroy para que eventos no lo recreen
+  delete sessions[id]; 
+  
   if (client) {
-    try { await client.logout(); } catch(e) {}
+    try { 
+      // logout() es vital para invalidar el token en los servidores de WA
+      console.log(`[${id}] Solicitando logout a WhatsApp...`);
+      await client.logout(); 
+    } catch(e) { console.warn(`[${id}] Logout falló o sesión no activa:`, e.message); }
     try { await client.destroy(); } catch(e) {}
   }
 
-  // Esperar un momento para que el cliente libere archivos
-  await new Promise(r => setTimeout(r, 800));
+  // Aumentar espera a 2 segundos para que Puppeteer libere todos los locks de archivos
+  await new Promise(r => setTimeout(r, 2000));
 
   // Borrar archivos de sesión y QR
   [
@@ -432,10 +443,19 @@ app.post('/session/:id/disconnect', async (req, res) => {
     path.join(DATA_DIR, `qr_${id}.json`),
   ].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
 
-  // Borrar carpeta LocalAuth (credenciales — fuerza QR nuevo obligatorio)
+  // Borrar carpeta LocalAuth con reintento (por si sigue bloqueada)
   const authDir = path.join(DATA_DIR, `session-${id}`);
-  try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {
-    console.error(`[${id}] Error borrando authDir:`, e.message);
+  if (fs.existsSync(authDir)) {
+    try {
+      fs.rmSync(authDir, { recursive: true, force: true });
+      console.log(`[${id}] Carpeta de sesión eliminada.`);
+    } catch(e) {
+      console.warn(`[${id}] Error primer intento borrado authDir:`, e.message);
+      // Reintento final tras 1s extra
+      setTimeout(() => {
+        try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e2) {}
+      }, 1000);
+    }
   }
 
   delete activityStore[id];
