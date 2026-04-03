@@ -190,6 +190,15 @@ function createSession(restauranteId) {
     if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
     delete sessions[restauranteId];
 
+    // Nunca reconectar si el usuario desconectó manualmente
+    if (manuallyDisconnected.has(restauranteId)) {
+      console.log(`[${restauranteId}] Desconexión manual — no reconectar (razón: ${reason})`);
+      // Asegurar que los archivos de auth estén borrados
+      const authDir = path.join(DATA_DIR, `session-${restauranteId}`);
+      try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
+      return;
+    }
+
     // Auto-reconexión solo para desconexiones de red (no logout intencional)
     const noReconnect = ['LOGOUT', 'CONFLICT'];
     if (noReconnect.includes(reason)) {
@@ -303,20 +312,39 @@ app.post('/session/start', (req, res) => {
   const { restaurante_id } = req.body;
   if (!restaurante_id) return res.status(400).json({ error: 'Falta restaurante_id' });
   console.log(`[${restaurante_id}] Petición de inicio de sesión recibida`);
-  manuallyDisconnected.delete(restaurante_id); // ya no es desconexión manual
+  clearManuallyDisconnected(restaurante_id); // ya no es desconexión manual
   createSession(restaurante_id);
   res.json({ status: 'starting', message: 'Iniciando cliente de WhatsApp...' });
 });
 
 // Set de IDs desconectados manualmente — el heartbeat no los reconecta
+// Se persiste en disco para sobrevivir reinicios del container (Railway)
 const manuallyDisconnected = new Set();
+
+function markManuallyDisconnected(id) {
+  manuallyDisconnected.add(id);
+  try { fs.writeFileSync(path.join(DATA_DIR, `disconnected_${id}`), '1'); } catch(e) {}
+}
+function clearManuallyDisconnected(id) {
+  manuallyDisconnected.delete(id);
+  try { const f = path.join(DATA_DIR, `disconnected_${id}`); if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {}
+}
+
+// Al iniciar: restaurar flags de desconexión manual desde disco
+try {
+  fs.readdirSync(DATA_DIR).filter(f => f.startsWith('disconnected_')).forEach(f => {
+    const id = f.replace('disconnected_', '');
+    manuallyDisconnected.add(id);
+    console.log(`[startup] Restaurando desconexión manual: ${id}`);
+  });
+} catch(e) {}
 
 app.post('/session/:id/disconnect', async (req, res) => {
   const id = req.params.id;
   console.log(`[${id}] Desconectando sesión completamente...`);
 
   // Marcar como desconectado manual ANTES de todo (evita que heartbeat reconecte)
-  manuallyDisconnected.add(id);
+  markManuallyDisconnected(id);
 
   // Destruir cliente si existe
   try {
