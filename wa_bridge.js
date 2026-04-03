@@ -453,3 +453,17 @@ setInterval(() => {
     }
   });
 }, 5 * 60 * 1000);
+
+// ── Self-ping keepalive: evita que Railway duerma el contenedor (cold start) ───────────
+// Hace una petición HTTP al propio servidor cada 10 minutos para mantenerlo activo.
+// Sin esto, Railway detiene el proceso tras ~10 min de inactividad y el primer mensaje
+// de WhatsApp puede tardar 30-90 segundos en responderse.
+const SELF_URL = process.env.RAILWAY_PUBLIC_DOMAIN
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/health`
+  : `http://localhost:${PORT}/health`;
+
+setInterval(() => {
+  fetch(SELF_URL)
+    .then(r => console.log(`[keepalive] ping OK — ${new Date().toLocaleTimeString('es-CO')}`))
+    .catch(e => console.warn(`[keepalive] ping falló: ${e.message}`));
+}, 10 * 60 * 1000); // cada 10 minutos
