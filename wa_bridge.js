@@ -273,17 +273,8 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] Mensaje de ${from}: ${JSON.stringify(body.substring(0, 60))}`);
     logActivity(restauranteId, { type: 'in', text: `${from}: ${body.substring(0, 40)}` });
 
-    const pref = restaurantLinkPrefs[restauranteId] || 'id';
-    const slug = restaurantSlugs[restauranteId];
-    
-    // Link seguro (predeterminado)
-    const safeLink = `${STORE_URL}/tienda.html?r=${restauranteId}`;
-    // Link con slug (amigable)
-    const slugLink = slug ? `${STORE_URL}/${slug}` : safeLink;
-    
-    // Decidir cuál enviar según preferencia del usuario
-    const storeLink = (pref === 'slug' && slug) ? slugLink : safeLink;
-
+    // Link único y seguro — siempre funciona independiente de slugs
+    const storeLink = `${STORE_URL}/tienda.html?r=${restauranteId}`;
     const restName  = restaurantNames[restauranteId] || 'nuestro restaurante';
     const bl        = body.toLowerCase();
 
@@ -310,13 +301,9 @@ function createSession(restauranteId) {
 
     try {
       let texto;
-      // Determinar el link final según la preferencia del usuario (Slug vs ID Seguro)
-      const pref    = restaurantLinkPrefs[restauranteId] || 'slug';
-      const slug    = restaurantSlugs[restauranteId];
-      const safeLink= `${STORE_URL}/tienda.html?r=${restauranteId}`;
-      const slugLink= slug ? `${STORE_URL}/${slug}` : safeLink;
-      
-      const finalLink = (pref === 'slug' && slug) ? slugLink : safeLink;
+      // Siempre usar el link seguro con ?r=ID para garantizar carga correcta
+      // El slug tiene problemas con el rewrite de .htaccess en algunos navegadores
+      const finalLink = `${STORE_URL}/tienda.html?r=${restauranteId}`;
 
       if (bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/)) {
         texto = `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n👉 Haz tu pedido aquí:\n${finalLink}`;
