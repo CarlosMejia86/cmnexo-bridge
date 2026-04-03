@@ -451,10 +451,11 @@ app.post('/session/:id/disconnect', async (req, res) => {
       console.log(`[${id}] Carpeta de sesión eliminada.`);
     } catch(e) {
       console.warn(`[${id}] Error primer intento borrado authDir:`, e.message);
-      // Reintento final tras 1s extra
-      setTimeout(() => {
-        try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e2) {}
-      }, 1000);
+      // Reintento: esperar a que Puppeteer libere locks antes de responder
+      await new Promise(r => setTimeout(r, 2000));
+      try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e2) {
+        console.warn(`[${id}] Error segundo intento borrado authDir:`, e2.message);
+      }
     }
   }
 
