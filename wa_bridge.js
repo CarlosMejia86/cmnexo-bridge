@@ -27,9 +27,12 @@ function logActivity(restauranteId, entry) {
   if (activityStore[restauranteId].length > 50) activityStore[restauranteId].pop();
 }
 
-// Caché de nombres y slugs de restaurante { [restauranteId]: 'String' }
+// Caché de configuración de restaurante { [restauranteId]: 'String' }
 const restaurantNames = {};
 const restaurantSlugs = {};
+const restaurantLinkPrefs = {};
+const restaurantSchedules = {};
+const restaurantClosedMsgs = {};
 
 // Watchdog: timestamp del último mensaje recibido por sesión
 const lastMsgTs = {};
@@ -139,7 +142,19 @@ function createSession(restauranteId) {
             restaurantNames[restauranteId] = data.restaurante.nombre;
             restaurantSlugs[restauranteId] = data.restaurante.slug || null;
             restaurantLinkPrefs[restauranteId] = data.restaurante.link_preferido || 'slug';
-            console.log(`[${restauranteId}] Información sincronizada: ${data.restaurante.nombre} (Slug: ${restaurantSlugs[restauranteId]}, Pref: ${restaurantLinkPrefs[restauranteId]})`);
+            restaurantClosedMsgs[restauranteId] = data.restaurante.bot_mensaje_cerrado || null;
+            
+            // Procesar horarios
+            if (data.restaurante.horarios_json) {
+              try {
+                const sched = typeof data.restaurante.horarios_json === 'string' 
+                  ? JSON.parse(data.restaurante.horarios_json) 
+                  : data.restaurante.horarios_json;
+                restaurantSchedules[restauranteId] = sched;
+              } catch(e) { console.warn(`[${restauranteId}] Error parseando horarios:`, e.message); }
+            }
+
+            console.log(`[${restauranteId}] Información sincronizada: ${data.restaurante.nombre} (Slug: ${restaurantSlugs[restauranteId]})`);
           } else {
             console.warn(`[${restauranteId}] Sincronización: La API no devolvió datos del restaurante esperado.`);
           }
@@ -265,6 +280,24 @@ function createSession(restauranteId) {
 
     const chatId = msg.from.includes('@') ? msg.from : `${msg.from}@c.us`;
     console.log(`[${restauranteId}] Respondiendo a chatId=${chatId}`);
+
+    // --- VALIDACIÓN DE HORARIO ---
+    const isAskingForHours = bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/);
+    if (!isAskingForHours && !isStoreOpen(restauranteId)) {
+      const closedMsg = restaurantClosedMsgs[restauranteId] || "Lo sentimos, por ahora estamos cerrados. Consulta nuestros horarios para saber cuándo volvemos. 🕐";
+      
+      // Reemplazar variables básicas si existen
+      const finalClosedMsg = closedMsg
+        .replace(/{negocio}/g, restName)
+        .replace(/{nombre}/g, 'amigo')
+        .replace(/{link_menu}/g, storeLink);
+
+      try {
+        await client.sendMessage(chatId, finalClosedMsg);
+        logActivity(restauranteId, { type: 'out', text: `(Cerrado) ${finalClosedMsg.substring(0, 40)}...` });
+        return; // Detener flujo
+      } catch(e) { console.error(`[${restauranteId}] Error enviando msg cerrado:`, e); }
+    }
 
     try {
       let texto;
@@ -518,3 +551,40 @@ setInterval(() => {
     .then(r => console.log(`[keepalive] ping OK — ${new Date().toLocaleTimeString('es-CO')}`))
     .catch(e => console.warn(`[keepalive] ping falló: ${e.message}`));
 }, 10 * 60 * 1000); // cada 10 minutos
+
+// ── Funciones de ayuda para validación de horario ───────────────────────────────────────
+
+/**
+ * Verifica si el restaurante está abierto según su configuración y la hora actual (Bogotá)
+ */
+function isStoreOpen(restauranteId) {
+  const sched = restaurantSchedules[restauranteId];
+  if (!sched || !Array.isArray(sched) || sched.length !== 7) return true; // Si no hay horario, asumimos abierto
+
+  // Obtener hora actual en Bogotá (GMT-5)
+  // Usamos Intl para asegurar que siempre sea la hora de Colombia independientemente del servidor
+  const now = new Date();
+  const options = { timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit', weekday: 'long', hour12: false };
+  const formatter = new Intl.DateTimeFormat('en-US', options);
+  const parts = formatter.formatToParts(now);
+  
+  const hour   = parseInt(parts.find(p => p.type === 'hour').value);
+  const minute = parseInt(parts.find(p => p.type === 'minute').value);
+  const dayStr = parts.find(p => p.type === 'weekday').value; // "Monday", "Tuesday", etc.
+
+  // Mapa de días (0=Lunes, 6=Domingo en el frontend)
+  const dayMap = { 'Monday': 0, 'Tuesday': 1, 'Wednesday': 2, 'Thursday': 3, 'Friday': 4, 'Saturday': 5, 'Sunday': 6 };
+  const dayIdx = dayMap[dayStr];
+  
+  const todaySched = sched[dayIdx];
+  if (!todaySched || !todaySched.open) return false;
+
+  const currentTime = hour * 60 + minute;
+  const [startH, startM] = todaySched.from.split(':').map(Number);
+  const [endH, endM]     = todaySched.to.split(':').map(Number);
+  
+  const startTime = startH * 60 + startM;
+  const endTime   = endH   * 60 + endM;
+
+  return currentTime >= startTime && currentTime <= endTime;
+}
