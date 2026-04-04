@@ -289,6 +289,18 @@ function createSession(restauranteId) {
     const chatId = msg.from.includes('@') ? msg.from : `${msg.from}@c.us`;
     console.log(`[${restauranteId}] Respondiendo a chatId=${chatId} | Link: ${storeLink}`);
 
+    // --- PEDIDO ACTIVO: no responder si el cliente ya tiene un pedido en proceso ---
+    try {
+      const activeRes = await fetch(`${API_URL}/pedidos/activo?restaurante_id=${restauranteId}&telefono=${from}`);
+      if (activeRes.ok) {
+        const activeData = await activeRes.json();
+        if (activeData.activo) {
+          console.log(`[${restauranteId}] Cliente ${from} tiene pedido activo — sin respuesta automática`);
+          return;
+        }
+      }
+    } catch(e) { console.warn(`[${restauranteId}] Error verificando pedido activo:`, e.message); }
+
     // --- VALIDACIÓN DE HORARIO ---
     const isAskingForHours = bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/);
     if (!isAskingForHours && !isStoreOpen(restauranteId)) {
