@@ -377,10 +377,18 @@ app.post('/session/start', async (req, res) => {
       try { await old.logout(); } catch(e) {}
       try { await old.destroy(); } catch(e) {}
     }
-    // Borrar carpeta de sesión inmediatamente
+    // Borrar carpeta de sesión con reintentos para garantizar QR limpio
     const authDir = path.join(DATA_DIR, `session-${restaurante_id}`);
-    if (fs.existsSync(authDir)) {
-      try { fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (!fs.existsSync(authDir)) break;
+      try {
+        fs.rmSync(authDir, { recursive: true, force: true });
+        console.log(`[${restaurante_id}] Carpeta auth borrada en intento ${attempt + 1}`);
+        break;
+      } catch(e) {
+        console.warn(`[${restaurante_id}] Intento ${attempt + 1} de borrado fallido:`, e.message);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 1500));
+      }
     }
   }
 
