@@ -405,19 +405,24 @@ app.post('/session/start', async (req, res) => {
       try { await old.logout(); } catch(e) {}
       try { await old.destroy(); } catch(e) {}
     }
-    // Borrar carpeta de sesión con reintentos para garantizar QR limpio
+    // Borrar carpeta de sesión con reintentos agresivos (Windows/Railway locks)
     const authDir = path.join(DATA_DIR, `session-${restaurante_id}`);
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       if (!fs.existsSync(authDir)) break;
       try {
         fs.rmSync(authDir, { recursive: true, force: true });
         console.log(`[${restaurante_id}] Carpeta auth borrada en intento ${attempt + 1}`);
         break;
       } catch(e) {
-        console.warn(`[${restaurante_id}] Intento ${attempt + 1} de borrado fallido:`, e.message);
-        if (attempt < 3) await new Promise(r => setTimeout(r, 1500));
+        console.warn(`[${restaurante_id}] Intento ${attempt + 1}/5 de borrado fallido:`, e.message);
+        if (attempt < 4) await new Promise(r => setTimeout(r, 2000));
       }
     }
+    // Borrar archivos de estado y QR individuales si existen
+    [
+      path.join(DATA_DIR, `session_${restaurante_id}.json`),
+      path.join(DATA_DIR, `qr_${restaurante_id}.json`),
+    ].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
   }
 
   // Solo limpiar el flag de desconexión manual si el usuario inició la sesión explícitamente
@@ -467,8 +472,8 @@ app.post('/session/:id/disconnect', async (req, res) => {
     try { await client.destroy(); } catch(e) { console.warn(`[${id}] Destroy falló:`, e.message); }
   }
 
-  // 4. Esperar a que el proceso libere todos los handles
-  await new Promise(r => setTimeout(r, 3000));
+  // 4. Esperar a que el proceso libere los archivos de Chromium
+  await new Promise(r => setTimeout(r, 4000));
 
   // 5. Borrar todos los archivos de sesión y QR
   [
@@ -478,15 +483,15 @@ app.post('/session/:id/disconnect', async (req, res) => {
 
   // 6. Borrar carpeta LocalAuth con hasta 5 reintentos
   const authDir = path.join(DATA_DIR, `session-${id}`);
-  for (let i = 0; i < 5; i++) {
-    if (!fs.existsSync(authDir)) { console.log(`[${id}] Carpeta auth no existe (intento ${i+1}) — OK`); break; }
+  for (let i = 0; i < 6; i++) {
+    if (!fs.existsSync(authDir)) { console.log(`[${id}] Carpeta auth borrada con éxito`); break; }
     try {
       fs.rmSync(authDir, { recursive: true, force: true });
       console.log(`[${id}] Carpeta auth eliminada en intento ${i+1}`);
       break;
     } catch(e) {
-      console.warn(`[${id}] Intento ${i+1}/5 fallido:`, e.message);
-      if (i < 4) await new Promise(r => setTimeout(r, 1500));
+      console.warn(`[${id}] Intento ${i+1}/6 fallido (EBUSY/EPERM) — reintentando en 2.5s...`);
+      if (i < 5) await new Promise(r => setTimeout(r, 2500));
     }
   }
 
