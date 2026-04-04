@@ -4,6 +4,7 @@ const express = require('express');
 const fs      = require('fs');
 const path    = require('path');
 const cors    = require('cors');
+const { execSync } = require('child_process');
 
 const app     = express();
 app.use(cors());
@@ -54,6 +55,15 @@ function createSession(restauranteId) {
   }
 
   console.log(`[${restauranteId}] Creando nueva sesión WhatsApp...`);
+
+  // Si la carpeta de auth tiene marcador de invalidación, borrarla ahora
+  const authDirCheck = path.join(DATA_DIR, `session-${restauranteId}`);
+  if (fs.existsSync(path.join(authDirCheck, '.invalidated'))) {
+    console.log(`[${restauranteId}] Carpeta auth inválida detectada — eliminando`);
+    try { fs.rmSync(authDirCheck, { recursive: true, force: true }); } catch(e) {
+      console.warn(`[${restauranteId}] No se pudo eliminar authDir inválido:`, e.message);
+    }
+  }
 
   const client = new Client({
     authStrategy: new LocalAuth({
@@ -435,55 +445,57 @@ app.post('/session/:id/disconnect', async (req, res) => {
   const id = req.params.id;
   console.log(`[${id}] Desconectando sesión completamente...`);
 
-  // Marcar como desconectado manual ANTES de todo (evita que heartbeat reconecte)
+  // 1. Marcar como desconectado manual ANTES de todo (bloquea watchdog y reconexión automática)
   markManuallyDisconnected(id);
 
-  // Parar watchdog inmediatamente
+  // 2. Parar watchdog
   if (watchdogTimers[id]) { clearInterval(watchdogTimers[id]); delete watchdogTimers[id]; }
 
-  // Destruir cliente si existe — siempre eliminar de sessions[]
+  // 3. Destruir cliente WhatsApp
   const client = sessions[id];
-  delete sessions[id]; 
-  
+  delete sessions[id];
+
   if (client) {
-    try { 
-      // logout() es vital para invalidar el token en los servidores de WA
-      console.log(`[${id}] Solicitando logout a WhatsApp...`);
-      await client.logout(); 
-    } catch(e) { console.warn(`[${id}] Logout falló o sesión no activa:`, e.message); }
-    try { await client.destroy(); } catch(e) {}
+    try { await client.logout(); } catch(e) { console.warn(`[${id}] Logout falló:`, e.message); }
+    try { await client.destroy(); } catch(e) { console.warn(`[${id}] Destroy falló:`, e.message); }
+    // Forzar cierre de Chromium si sigue corriendo
+    try { execSync('pkill -f chromium || pkill -f chrome || true', { stdio: 'ignore' }); } catch(e) {}
   }
 
-  // Aumentar espera a 2 segundos para que Puppeteer libere todos los locks de archivos
-  await new Promise(r => setTimeout(r, 2000));
+  // 4. Esperar a que el proceso libere todos los handles
+  await new Promise(r => setTimeout(r, 3000));
 
-  // Borrar archivos de sesión y QR
+  // 5. Borrar todos los archivos de sesión y QR
   [
     path.join(DATA_DIR, `session_${id}.json`),
     path.join(DATA_DIR, `qr_${id}.json`),
   ].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
 
-  // Borrar carpeta LocalAuth con reintento (por si sigue bloqueada)
+  // 6. Borrar carpeta LocalAuth con hasta 5 reintentos
   const authDir = path.join(DATA_DIR, `session-${id}`);
-  if (fs.existsSync(authDir)) {
+  for (let i = 0; i < 5; i++) {
+    if (!fs.existsSync(authDir)) { console.log(`[${id}] Carpeta auth no existe (intento ${i+1}) — OK`); break; }
     try {
       fs.rmSync(authDir, { recursive: true, force: true });
-      console.log(`[${id}] Carpeta de sesión eliminada.`);
+      console.log(`[${id}] Carpeta auth eliminada en intento ${i+1}`);
+      break;
     } catch(e) {
-      console.warn(`[${id}] Error primer intento borrado authDir:`, e.message);
-      // Reintento: esperar a que Puppeteer libere locks antes de responder
-      await new Promise(r => setTimeout(r, 2000));
-      try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e2) {
-        console.warn(`[${id}] Error segundo intento borrado authDir:`, e2.message);
-      }
+      console.warn(`[${id}] Intento ${i+1}/5 fallido:`, e.message);
+      if (i < 4) await new Promise(r => setTimeout(r, 1500));
     }
+  }
+
+  // 7. Si la carpeta persiste, escribir un marcador para que createSession la ignore
+  if (fs.existsSync(authDir)) {
+    console.warn(`[${id}] ⚠️ No se pudo borrar authDir — escribiendo marcador de invalidación`);
+    try { fs.writeFileSync(path.join(authDir, '.invalidated'), '1'); } catch(e) {}
   }
 
   delete activityStore[id];
   delete restaurantNames[id];
   delete restaurantSlugs[id];
   delete lastMsgTs[id];
-  console.log(`[${id}] ✅ Sesión destruida completamente — se pedirá QR nuevo`);
+  console.log(`[${id}] ✅ Sesión destruida completamente`);
   res.json({ status: 'disconnected' });
 });
 
