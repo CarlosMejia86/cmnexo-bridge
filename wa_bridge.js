@@ -4,7 +4,6 @@ const express = require('express');
 const fs      = require('fs');
 const path    = require('path');
 const cors    = require('cors');
-const { execSync } = require('child_process');
 
 const app     = express();
 app.use(cors());
@@ -390,7 +389,14 @@ app.post('/session/start', async (req, res) => {
   const { restaurante_id, force_fresh } = req.body;
   if (!restaurante_id) return res.status(400).json({ error: 'Falta restaurante_id' });
   console.log(`[${restaurante_id}] Petición de inicio de sesión recibida (force_fresh=${force_fresh})`);
-  
+
+  // Si está marcado como desconectado manualmente, solo permitir inicio si force_fresh=true
+  // (force_fresh solo se envía cuando el usuario presiona el botón "Generar QR")
+  if (manuallyDisconnected.has(restaurante_id) && !force_fresh) {
+    console.log(`[${restaurante_id}] Bloqueado — desconectado manualmente, se requiere acción del usuario`);
+    return res.status(403).json({ error: 'desconectado_manual' });
+  }
+
   // Si se pide inicio limpio o si ya hay sesión, destruir rastros
   if (force_fresh || sessions[restaurante_id]) {
     const old = sessions[restaurante_id];
@@ -414,7 +420,8 @@ app.post('/session/start', async (req, res) => {
     }
   }
 
-  clearManuallyDisconnected(restaurante_id);
+  // Solo limpiar el flag de desconexión manual si el usuario inició la sesión explícitamente
+  if (force_fresh) clearManuallyDisconnected(restaurante_id);
   createSession(restaurante_id);
   res.json({ status: 'starting', message: 'Iniciando cliente de WhatsApp...' });
 });
@@ -458,8 +465,6 @@ app.post('/session/:id/disconnect', async (req, res) => {
   if (client) {
     try { await client.logout(); } catch(e) { console.warn(`[${id}] Logout falló:`, e.message); }
     try { await client.destroy(); } catch(e) { console.warn(`[${id}] Destroy falló:`, e.message); }
-    // Forzar cierre de Chromium si sigue corriendo
-    try { execSync('pkill -f chromium || pkill -f chrome || true', { stdio: 'ignore' }); } catch(e) {}
   }
 
   // 4. Esperar a que el proceso libere todos los handles
