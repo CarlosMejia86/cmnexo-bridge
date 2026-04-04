@@ -151,7 +151,7 @@ function createSession(restauranteId) {
     writeSessionConnected();
 
     // Cargar nombre del restaurante y slug periódicamente para reflejar cambios en el panel
-    const syncInfo = () => {
+    const syncInfo = (retries = 3) => {
       fetch(`${API_URL}/tienda?r=${restauranteId}`)
         .then(r => r.json())
         .then(data => {
@@ -161,7 +161,6 @@ function createSession(restauranteId) {
             restaurantLinkPrefs[restauranteId] = data.restaurante.link_preferido || 'slug';
             restaurantClosedMsgs[restauranteId] = data.restaurante.bot_mensaje_cerrado || null;
             
-            // Procesar horarios
             if (data.restaurante.horarios_json) {
               try {
                 const sched = typeof data.restaurante.horarios_json === 'string' 
@@ -170,18 +169,20 @@ function createSession(restauranteId) {
                 restaurantSchedules[restauranteId] = sched;
               } catch(e) { console.warn(`[${restauranteId}] Error parseando horarios:`, e.message); }
             }
-
-            console.log(`[${restauranteId}] Información sincronizada: ${data.restaurante.nombre} (Slug: ${restaurantSlugs[restauranteId]})`);
-          } else {
-            console.warn(`[${restauranteId}] Sincronización: La API no devolvió datos del restaurante esperado.`);
+            console.log(`[${restauranteId}] Sincronización OK: ${data.restaurante.nombre}`);
+          } else if (retries > 0) {
+            console.warn(`[${restauranteId}] Datos incompletos — reintentando (${retries})...`);
+            setTimeout(() => syncInfo(retries - 1), 5000);
           }
         })
-        .catch(err => console.warn(`[${restauranteId}] Error sincronizando info: ${err.message}`));
+        .catch(err => {
+          console.warn(`[${restauranteId}] Fallo en sync: ${err.message}`);
+          if (retries > 0) setTimeout(() => syncInfo(retries - 1), 10000);
+        });
     };
 
     syncInfo();
-    // Resincronizar cada 15 minutos por si el usuario cambia el nombre en el panel
-    setInterval(syncInfo, 15 * 60 * 1000);
+    setInterval(() => syncInfo(1), 15 * 60 * 1000);
 
     // Iniciar watchdog: verifica cada 3 min que el cliente sigue activo
     lastMsgTs[restauranteId] = Date.now();
@@ -330,19 +331,17 @@ function createSession(restauranteId) {
 
     try {
       let texto;
-      // Siempre usar el link seguro con ?r=ID para garantizar carga correcta
-      // El slug tiene problemas con el rewrite de .htaccess en algunos navegadores
       const finalLink = `${STORE_URL}/tienda.html?r=${restauranteId}`;
 
       if (bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/)) {
         texto = `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n👉 Haz tu pedido aquí:\n${finalLink}`;
-        logActivity(restauranteId, { type: 'out', text: 'Bot respondió horario' });
+        logActivity(restauranteId, { type: 'out', text: 'Respuesta: Horarios' });
       } else if (bl.match(/domicilio|delivery|env[ií]o|despacho|llevan/)) {
         texto = `🛵 Sí hacemos domicilios. Tiempo estimado: 25–40 min.\n\n👉 Haz tu pedido aquí:\n${finalLink}`;
-        logActivity(restauranteId, { type: 'out', text: 'Bot respondió domicilio + link' });
+        logActivity(restauranteId, { type: 'out', text: 'Respuesta: Domicilios' });
       } else {
         texto = `¡Hola! 👋 Bienvenido a *${restName}*.\n\n🛒 Haz tu pedido aquí:\n${finalLink}\n\nSelecciona tus productos, elige adiciones y confirma en segundos. 😊`;
-        logActivity(restauranteId, { type: 'out', text: `Saludo + Link Enviado (${restName})` });
+        logActivity(restauranteId, { type: 'out', text: `Saludo enviado (${restName})` });
       }
 
       if (texto) {
@@ -350,7 +349,8 @@ function createSession(restauranteId) {
         console.log(`[${restauranteId}] ✅ Mensaje enviado correctamente a ${from}`);
       }
     } catch(e) {
-      console.error(`[${restauranteId}] ❌ Error sendMessage:`, e.message, e.stack?.split('\n')[1]);
+      console.error(`[${restauranteId}] ❌ Error sendMessage:`, e.message);
+      logActivity(restauranteId, { type: 'out', text: `Error al responder: ${e.message.substring(0,25)}` });
     }
   }
 
