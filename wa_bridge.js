@@ -39,6 +39,51 @@ const lastMsgTs = {};
 // Watchdog timers por sesión
 const watchdogTimers = {};
 
+// Limpieza profunda de sesión (borrado físico de archivos y carpetas)
+async function clearSessionData(id) {
+  console.log(`[${id}] Iniciando limpieza profunda de sesión...`);
+  
+  // 1. Destruir cliente si existe en memoria
+  const client = sessions[id];
+  delete sessions[id];
+  if (client) {
+    try { await client.logout(); } catch(e) {}
+    try { await client.destroy(); } catch(e) {}
+  }
+
+  // 2. Esperar a que Chromium libere los bloqueos de archivos
+  await new Promise(r => setTimeout(r, 4000));
+
+  // 3. Borrar archivos de estado y QR
+  [
+    path.join(DATA_DIR, `session_${id}.json`),
+    path.join(DATA_DIR, `qr_${id}.json`),
+  ].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
+
+  // 4. Borrar carpeta LocalAuth con hasta 8 reintentos intensivos
+  const authDir = path.join(DATA_DIR, `session-${id}`);
+  for (let i = 0; i < 8; i++) {
+    if (!fs.existsSync(authDir)) { console.log(`[${id}] ✅ Carpeta auth borrada físicamente`); return true; }
+    try {
+      fs.rmSync(authDir, { recursive: true, force: true });
+      console.log(`[${id}] Carpeta auth eliminada en intento ${i+1}`);
+      return true;
+    } catch(e) {
+      console.warn(`[${id}] Intento ${i+1}/8 fallido (archivo en uso) — esperando 2.5s...`);
+      if (i < 7) await new Promise(r => setTimeout(r, 2500));
+    }
+  }
+
+  // 5. Si persiste, marcar como inválida para que el constructor de Client la ignore o re-intente
+  if (fs.existsSync(authDir)) {
+    try { 
+      fs.writeFileSync(path.join(authDir, '.invalidated'), '1');
+      console.warn(`[${id}] ⚠️ Carpeta persistente marcada como inválida`);
+    } catch(e) {}
+  }
+  return false;
+}
+
 function createSession(restauranteId) {
   if (sessions[restauranteId]) {
     // Reutilizar solo si el cliente ya está inicializado y conectado
@@ -399,30 +444,7 @@ app.post('/session/start', async (req, res) => {
 
   // Si se pide inicio limpio o si ya hay sesión, destruir rastros
   if (force_fresh || sessions[restaurante_id]) {
-    const old = sessions[restaurante_id];
-    delete sessions[restaurante_id];
-    if (old) {
-      try { await old.logout(); } catch(e) {}
-      try { await old.destroy(); } catch(e) {}
-    }
-    // Borrar carpeta de sesión con reintentos agresivos (Windows/Railway locks)
-    const authDir = path.join(DATA_DIR, `session-${restaurante_id}`);
-    for (let attempt = 0; attempt < 5; attempt++) {
-      if (!fs.existsSync(authDir)) break;
-      try {
-        fs.rmSync(authDir, { recursive: true, force: true });
-        console.log(`[${restaurante_id}] Carpeta auth borrada en intento ${attempt + 1}`);
-        break;
-      } catch(e) {
-        console.warn(`[${restaurante_id}] Intento ${attempt + 1}/5 de borrado fallido:`, e.message);
-        if (attempt < 4) await new Promise(r => setTimeout(r, 2000));
-      }
-    }
-    // Borrar archivos de estado y QR individuales si existen
-    [
-      path.join(DATA_DIR, `session_${restaurante_id}.json`),
-      path.join(DATA_DIR, `qr_${restaurante_id}.json`),
-    ].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
+    await clearSessionData(restaurante_id);
   }
 
   // Solo limpiar el flag de desconexión manual si el usuario inició la sesión explícitamente
@@ -455,57 +477,24 @@ try {
 
 app.post('/session/:id/disconnect', async (req, res) => {
   const id = req.params.id;
-  console.log(`[${id}] Desconectando sesión completamente...`);
+  console.log(`[${id}] Petición de desconexión total recibida`);
 
-  // 1. Marcar como desconectado manual ANTES de todo (bloquea watchdog y reconexión automática)
+  // 1. Marcar como desconectado manual (persiste en disco)
   markManuallyDisconnected(id);
 
-  // 2. Parar watchdog
+  // 2. Parar watchdog si existe
   if (watchdogTimers[id]) { clearInterval(watchdogTimers[id]); delete watchdogTimers[id]; }
 
-  // 3. Destruir cliente WhatsApp
-  const client = sessions[id];
-  delete sessions[id];
+  // 3. Limpieza profunda (Cerrar cliente + Borrado físico de archivos/carpetas)
+  await clearSessionData(id);
 
-  if (client) {
-    try { await client.logout(); } catch(e) { console.warn(`[${id}] Logout falló:`, e.message); }
-    try { await client.destroy(); } catch(e) { console.warn(`[${id}] Destroy falló:`, e.message); }
-  }
-
-  // 4. Esperar a que el proceso libere los archivos de Chromium
-  await new Promise(r => setTimeout(r, 4000));
-
-  // 5. Borrar todos los archivos de sesión y QR
-  [
-    path.join(DATA_DIR, `session_${id}.json`),
-    path.join(DATA_DIR, `qr_${id}.json`),
-  ].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {} });
-
-  // 6. Borrar carpeta LocalAuth con hasta 5 reintentos
-  const authDir = path.join(DATA_DIR, `session-${id}`);
-  for (let i = 0; i < 6; i++) {
-    if (!fs.existsSync(authDir)) { console.log(`[${id}] Carpeta auth borrada con éxito`); break; }
-    try {
-      fs.rmSync(authDir, { recursive: true, force: true });
-      console.log(`[${id}] Carpeta auth eliminada en intento ${i+1}`);
-      break;
-    } catch(e) {
-      console.warn(`[${id}] Intento ${i+1}/6 fallido (EBUSY/EPERM) — reintentando en 2.5s...`);
-      if (i < 5) await new Promise(r => setTimeout(r, 2500));
-    }
-  }
-
-  // 7. Si la carpeta persiste, escribir un marcador para que createSession la ignore
-  if (fs.existsSync(authDir)) {
-    console.warn(`[${id}] ⚠️ No se pudo borrar authDir — escribiendo marcador de invalidación`);
-    try { fs.writeFileSync(path.join(authDir, '.invalidated'), '1'); } catch(e) {}
-  }
-
+  // 4. Limpiar estados en memoria
   delete activityStore[id];
   delete restaurantNames[id];
   delete restaurantSlugs[id];
   delete lastMsgTs[id];
-  console.log(`[${id}] ✅ Sesión destruida completamente`);
+
+  console.log(`[${id}] ✅ Desconexión y limpieza completada`);
   res.json({ status: 'disconnected' });
 });
 
