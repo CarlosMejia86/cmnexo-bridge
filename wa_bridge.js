@@ -565,9 +565,35 @@ app.post('/notify', async (req, res) => {
   }
   const { client, sessionId } = found;
   try {
-    const chatId = phone.replace(/[^0-9]/g, '') + '@c.us';
-    await client.sendMessage(chatId, message);
-    logActivity(sessionId, { type: 'out', text: `Notif → ${phone}: ${message.substring(0, 40)}` });
+    // Normalizar número: quitar todo excepto dígitos
+    let cleanPhone = phone.replace(/[^0-9]/g, '');
+
+    // Números colombianos de 10 dígitos que empiezan por 3 → agregar código de país 57
+    if (cleanPhone.length === 10 && cleanPhone.startsWith('3')) {
+      cleanPhone = '57' + cleanPhone;
+    }
+    // Si empieza con 0 (marcación nacional) → reemplazar 0 por 57
+    if (cleanPhone.startsWith('0') && cleanPhone.length >= 10) {
+      cleanPhone = '57' + cleanPhone.substring(1);
+    }
+
+    if (cleanPhone.length < 10) {
+      console.warn(`[${sessionId}] Número inválido o demasiado corto: ${phone}`);
+      return res.status(400).json({ error: 'Número de teléfono inválido' });
+    }
+
+    const chatId = cleanPhone + '@c.us';
+    console.log(`[${sessionId}] Enviando notificación → chatId=${chatId}`);
+
+    // Verificar que el número existe en WhatsApp antes de enviar
+    const numberId = await client.getNumberId(cleanPhone).catch(() => null);
+    if (!numberId) {
+      console.warn(`[${sessionId}] Número ${cleanPhone} no encontrado en WhatsApp`);
+      return res.status(404).json({ error: `Número ${cleanPhone} no registrado en WhatsApp` });
+    }
+
+    await client.sendMessage(numberId._serialized, message);
+    logActivity(sessionId, { type: 'out', text: `Notif → ${cleanPhone}: ${message.substring(0, 40)}` });
     res.json({ ok: true });
   } catch(e) {
     console.error(`[${sessionId}] Error enviando notificación:`, e.message);
