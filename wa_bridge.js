@@ -15,6 +15,20 @@ const STORE_URL = process.env.STORE_URL || 'https://cmnexo.com';
 
 console.log('=== CMNexo WA Bridge v1.2.0 iniciando ===');
 
+/**
+ * Normaliza un número de teléfono a formato internacional sin + ni espacios.
+ * Soporta números colombianos (10 dígitos que empiezan con 3 → agrega 57).
+ * Ejemplo: "3001234567" → "573001234567"
+ *          "+57 300 123 4567" → "573001234567"
+ *          "573001234567" → "573001234567"
+ */
+function normalizePhone(raw) {
+  let n = String(raw).replace(/[^0-9]/g, '');
+  if (n.startsWith('0') && n.length >= 10) n = '57' + n.substring(1); // marcación nacional
+  if (n.length === 10 && n.startsWith('3'))  n = '57' + n;            // móvil colombiano
+  return n;
+}
+
 const sessions = {};
 const DATA_DIR = path.join(__dirname, '.wwebjs_auth');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -565,38 +579,13 @@ app.post('/notify', async (req, res) => {
   }
   const { client, sessionId } = found;
   try {
-    // Normalizar número: quitar todo excepto dígitos
-    let cleanPhone = phone.replace(/[^0-9]/g, '');
-
-    // Números colombianos de 10 dígitos que empiezan por 3 → agregar código de país 57
-    if (cleanPhone.length === 10 && cleanPhone.startsWith('3')) {
-      cleanPhone = '57' + cleanPhone;
-    }
-    // Si empieza con 0 (marcación nacional) → reemplazar 0 por 57
-    if (cleanPhone.startsWith('0') && cleanPhone.length >= 10) {
-      cleanPhone = '57' + cleanPhone.substring(1);
-    }
-
-    if (cleanPhone.length < 10) {
-      console.warn(`[${sessionId}] Número inválido o demasiado corto: ${phone}`);
-      return res.status(400).json({ error: 'Número de teléfono inválido' });
-    }
-
-    const chatId = cleanPhone + '@c.us';
+    const chatId = normalizePhone(phone) + '@c.us';
     console.log(`[${sessionId}] Enviando notificación → chatId=${chatId}`);
-
-    // Verificar que el número existe en WhatsApp antes de enviar
-    const numberId = await client.getNumberId(cleanPhone).catch(() => null);
-    if (!numberId) {
-      console.warn(`[${sessionId}] Número ${cleanPhone} no encontrado en WhatsApp`);
-      return res.status(404).json({ error: `Número ${cleanPhone} no registrado en WhatsApp` });
-    }
-
-    await client.sendMessage(numberId._serialized, message);
-    logActivity(sessionId, { type: 'out', text: `Notif → ${cleanPhone}: ${message.substring(0, 40)}` });
+    await client.sendMessage(chatId, message);
+    logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: ${message.substring(0, 40)}` });
     res.json({ ok: true });
   } catch(e) {
-    console.error(`[${sessionId}] Error enviando notificación:`, e.message);
+    console.error(`[${sessionId}] Error enviando notificación a ${phone}:`, e.message);
     res.status(500).json({ error: e.message });
   }
 });
