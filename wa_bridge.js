@@ -116,6 +116,18 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] Sesión en estado indeterminado — reemplazando`);
     delete sessions[restauranteId];
     existing.destroy().catch(() => {});
+  } else {
+    // LIMPIEZA DE SESIONES DUPLICADAS (ANTI-FUGA):
+    // Si existe otra sesión con el mismo baseId, destruirla antes de crear esta.
+    for (const [sid, client] of Object.entries(sessions)) {
+      const sBase = sid.includes('_') ? sid.substring(0, sid.lastIndexOf('_')) : sid;
+      if (sBase === baseId && sid !== restauranteId) {
+        console.log(`[${restauranteId}] Detectada sesión obsoleta (${sid}) — limpiando antes de re-iniciar`);
+        delete sessions[sid];
+        if (watchdogTimers[sid]) { clearInterval(watchdogTimers[sid]); delete watchdogTimers[sid]; }
+        client.destroy().catch(() => {});
+      }
+    }
   }
 
   console.log(`[${restauranteId}] Creando nueva sesión WhatsApp... (baseId=${baseId})`);
@@ -356,8 +368,9 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] Mensaje de ${from}: ${JSON.stringify(body.substring(0, 60))}`);
     logActivity(restauranteId, { type: 'in', text: `${from}: ${body.substring(0, 40)}` });
 
-    // Link siempre usa el baseId (sin nonce) para que la tienda lo encuentre en la DB
-    const storeLink = `${STORE_URL}/tienda.html?r=${baseId}`;
+    // Link siempre usa el baseId (sin nonce) y adjunta el teléfono del cliente
+    // Esto permite que la tienda auto-complete el campo de WhatsApp
+    const storeLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${from}`;
     const restName  = restaurantNames[restauranteId] || 'nuestro restaurante';
     const bl        = body.toLowerCase();
 
@@ -398,7 +411,7 @@ function createSession(restauranteId) {
 
     try {
       let texto;
-      const finalLink = `${STORE_URL}/tienda.html?r=${baseId}`;
+      const finalLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${from}`;
 
       if (bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/)) {
         texto = `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n👉 Haz tu pedido aquí:\n${finalLink}`;
@@ -558,12 +571,23 @@ app.get('/session/:id/status', (req, res) => {
 function findClientByBaseId(baseId) {
   // Búsqueda directa primero
   if (sessions[baseId]) return { client: sessions[baseId], sessionId: baseId };
+  
   // Buscar entre todas las sesiones cuyo ID base coincida
+  const candidates = [];
   for (const [sid, client] of Object.entries(sessions)) {
     const sBase = sid.includes('_') ? sid.substring(0, sid.lastIndexOf('_')) : sid;
-    if (sBase === baseId && client.info) return { client, sessionId: sid };
+    // Preferir sesiones que tengan .info.wid (ya conectadas)
+    if (sBase === baseId) {
+      candidates.push({ sid, client, ready: !!(client.info && client.info.wid) });
+    }
   }
-  return null;
+  
+  if (candidates.length === 0) return null;
+  
+  // Priorizar READY y luego por orden de inserción (la más nueva suele ser la última)
+  candidates.sort((a, b) => (b.ready - a.ready));
+  const best = candidates[candidates.length - 1]; // Tomar la última del grupo de mejores
+  return { client: best.client, sessionId: best.sid };
 }
 
 // Enviar mensaje WA a un teléfono desde la tienda
