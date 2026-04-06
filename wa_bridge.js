@@ -367,11 +367,13 @@ function createSession(restauranteId) {
     if (!isAskingForHours && !isStoreOpen(restauranteId)) {
       const closedMsg = restaurantClosedMsgs[restauranteId] || "Lo sentimos, por ahora estamos cerrados. Consulta nuestros horarios para saber cuándo volvemos. 🕐";
       
-      // Reemplazar variables básicas si existen
+      // Reemplazar variables del mensaje de cerrado
+      const nextOpen = getNextOpeningTime(restauranteId);
       const finalClosedMsg = closedMsg
         .replace(/{negocio}/g, restName)
         .replace(/{nombre}/g, 'amigo')
-        .replace(/{link_menu}/g, storeLink);
+        .replace(/{link_menu}/g, storeLink)
+        .replace(/{hora_apertura}/g, nextOpen || 'pronto');
 
       try {
         await client.sendMessage(chatId, finalClosedMsg);
@@ -538,20 +540,37 @@ app.get('/session/:id/status', (req, res) => {
   res.json({ status: sessions[id] ? 'connecting' : 'disconnected' });
 });
 
+// Buscar sesión activa por baseId — el PHP siempre envía el UUID base sin nonce
+function findClientByBaseId(baseId) {
+  // Búsqueda directa primero
+  if (sessions[baseId]) return { client: sessions[baseId], sessionId: baseId };
+  // Buscar entre todas las sesiones cuyo ID base coincida
+  for (const [sid, client] of Object.entries(sessions)) {
+    const sBase = sid.includes('_') ? sid.substring(0, sid.lastIndexOf('_')) : sid;
+    if (sBase === baseId && client.info) return { client, sessionId: sid };
+  }
+  return null;
+}
+
 // Enviar mensaje WA a un teléfono desde la tienda
 // POST /notify { restaurante_id, phone, message }
 app.post('/notify', async (req, res) => {
   const { restaurante_id, phone, message } = req.body;
   if (!restaurante_id || !phone || !message) return res.status(400).json({ error: 'Faltan datos' });
-  const client = sessions[restaurante_id];
-  if (!client) return res.status(404).json({ error: 'Sesión no activa' });
+
+  const found = findClientByBaseId(restaurante_id);
+  if (!found) {
+    console.warn(`[notify] Sesión no encontrada para baseId=${restaurante_id}`);
+    return res.status(404).json({ error: 'Sesión no activa' });
+  }
+  const { client, sessionId } = found;
   try {
     const chatId = phone.replace(/[^0-9]/g, '') + '@c.us';
     await client.sendMessage(chatId, message);
-    logActivity(restaurante_id, { type: 'out', text: `Notif → ${phone}: ${message.substring(0, 40)}` });
+    logActivity(sessionId, { type: 'out', text: `Notif → ${phone}: ${message.substring(0, 40)}` });
     res.json({ ok: true });
   } catch(e) {
-    console.error(`[${restaurante_id}] Error enviando notificación:`, e.message);
+    console.error(`[${sessionId}] Error enviando notificación:`, e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -650,6 +669,44 @@ setInterval(() => {
 }, 10 * 60 * 1000); // cada 10 minutos
 
 // ── Funciones de ayuda para validación de horario ───────────────────────────────────────
+
+/**
+ * Devuelve la próxima hora de apertura del restaurante (para reemplazar {hora_apertura}).
+ * Si el restaurante abre más tarde hoy, devuelve "HH:MM". Si no abre hoy, indica el día.
+ */
+function getNextOpeningTime(restauranteId) {
+  const sched = restaurantSchedules[restauranteId];
+  if (!sched || !Array.isArray(sched) || sched.length !== 7) return null;
+
+  const now = new Date();
+  const opts = { timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit', weekday: 'long', hour12: false };
+  const parts = new Intl.DateTimeFormat('en-US', opts).formatToParts(now);
+  const hour   = parseInt(parts.find(p => p.type === 'hour').value);
+  const minute = parseInt(parts.find(p => p.type === 'minute').value);
+  const dayStr = parts.find(p => p.type === 'weekday').value;
+  const dayMap = { 'Monday': 0, 'Tuesday': 1, 'Wednesday': 2, 'Thursday': 3, 'Friday': 4, 'Saturday': 5, 'Sunday': 6 };
+  const dayNames = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
+  const todayIdx = dayMap[dayStr];
+  const currentMins = hour * 60 + minute;
+
+  // Verificar si todavía abre hoy (la hora de apertura aún no ha pasado)
+  const todaySched = sched[todayIdx];
+  if (todaySched && todaySched.open) {
+    const [startH, startM] = todaySched.from.split(':').map(Number);
+    if (startH * 60 + startM > currentMins) return `las ${todaySched.from}`;
+  }
+
+  // Buscar el siguiente día que abra (hasta 7 días)
+  for (let i = 1; i <= 7; i++) {
+    const nextIdx = (todayIdx + i) % 7;
+    const nextSched = sched[nextIdx];
+    if (nextSched && nextSched.open) {
+      const dayLabel = i === 1 ? 'mañana' : `el ${dayNames[nextIdx]}`;
+      return `${dayLabel} a las ${nextSched.from}`;
+    }
+  }
+  return null;
+}
 
 /**
  * Verifica si el restaurante está abierto según su configuración y la hora actual (Bogotá)
