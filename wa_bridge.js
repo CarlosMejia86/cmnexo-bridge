@@ -479,16 +479,33 @@ app.post('/session/:id/disconnect', async (req, res) => {
   const id = req.params.id;
   console.log(`[${id}] Petición de desconexión total recibida`);
 
-  // 1. Marcar como desconectado manual (persiste en disco)
+  // Derivar el ID base (sin nonce) para limpiar también sesiones residuales
+  // Formato con nonce: "123_abc4" — sin nonce: "123"
+  const baseId = id.includes('_') ? id.substring(0, id.lastIndexOf('_')) : null;
+
+  // 1. Marcar como desconectado manual para TODOS los IDs afectados (persiste en disco)
   markManuallyDisconnected(id);
+  if (baseId) markManuallyDisconnected(baseId);
 
-  // 2. Parar watchdog si existe
-  if (watchdogTimers[id]) { clearInterval(watchdogTimers[id]); delete watchdogTimers[id]; }
+  // 2. Parar watchdog de todos los IDs afectados
+  [id, baseId].filter(Boolean).forEach(sid => {
+    if (watchdogTimers[sid]) { clearInterval(watchdogTimers[sid]); delete watchdogTimers[sid]; }
+  });
 
-  // 3. Limpieza profunda (Cerrar cliente + Borrado físico de archivos/carpetas)
+  // 3. Limpieza profunda del ID solicitado
   await clearSessionData(id);
 
-  // 4. Limpiar estados en memoria
+  // 4. Si hay un ID base diferente con sesión activa o archivos residuales, limpiar también
+  if (baseId && baseId !== id) {
+    console.log(`[${id}] Limpiando también sesión base: ${baseId}`);
+    await clearSessionData(baseId);
+    delete activityStore[baseId];
+    delete restaurantNames[baseId];
+    delete restaurantSlugs[baseId];
+    delete lastMsgTs[baseId];
+  }
+
+  // 5. Limpiar estados en memoria del ID principal
   delete activityStore[id];
   delete restaurantNames[id];
   delete restaurantSlugs[id];
@@ -599,6 +616,12 @@ setInterval(() => {
   sesFiles.forEach(file => {
     const restauranteId = file.replace('session_', '').replace('.json', '');
     if (manuallyDisconnected.has(restauranteId)) return; // desconectado por el usuario — no reconectar
+    // Si el ID base (sin nonce) está marcado como desconectado manual, tampoco reconectar variantes con nonce
+    const baseId = restauranteId.includes('_') ? restauranteId.substring(0, restauranteId.lastIndexOf('_')) : null;
+    if (baseId && manuallyDisconnected.has(baseId)) {
+      console.log(`[heartbeat] Saltando ${restauranteId} — ID base ${baseId} desconectado manualmente`);
+      return;
+    }
     if (!sessions[restauranteId]) {
       console.log(`[heartbeat] Reconectando sesión caída: ${restauranteId}`);
       createSession(restauranteId);
