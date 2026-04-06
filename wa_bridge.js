@@ -85,6 +85,12 @@ async function clearSessionData(id) {
 }
 
 function createSession(restauranteId) {
+  // ID base sin nonce — usado para links a la tienda y llamadas a la API
+  // Formato con nonce: "uuid_abc4" → base: "uuid"
+  const baseId = restauranteId.includes('_')
+    ? restauranteId.substring(0, restauranteId.lastIndexOf('_'))
+    : restauranteId;
+
   if (sessions[restauranteId]) {
     // Reutilizar solo si el cliente ya está inicializado y conectado
     const existing = sessions[restauranteId];
@@ -98,7 +104,7 @@ function createSession(restauranteId) {
     existing.destroy().catch(() => {});
   }
 
-  console.log(`[${restauranteId}] Creando nueva sesión WhatsApp...`);
+  console.log(`[${restauranteId}] Creando nueva sesión WhatsApp... (baseId=${baseId})`);
 
   // Si la carpeta de auth tiene marcador de invalidación, borrarla ahora
   const authDirCheck = path.join(DATA_DIR, `session-${restauranteId}`);
@@ -195,9 +201,9 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] ✅ WhatsApp listo (evento ready)`);
     writeSessionConnected();
 
-    // Cargar nombre del restaurante y slug periódicamente para reflejar cambios en el panel
+    // Cargar nombre del restaurante y slug periódicamente — usar baseId para la API
     const syncInfo = (retries = 3) => {
-      fetch(`${API_URL}/tienda?r=${restauranteId}`)
+      fetch(`${API_URL}/tienda?r=${baseId}`)
         .then(r => r.json())
         .then(data => {
           if (data && data.restaurante) {
@@ -205,11 +211,11 @@ function createSession(restauranteId) {
             restaurantSlugs[restauranteId] = data.restaurante.slug || null;
             restaurantLinkPrefs[restauranteId] = data.restaurante.link_preferido || 'slug';
             restaurantClosedMsgs[restauranteId] = data.restaurante.bot_mensaje_cerrado || null;
-            
+
             if (data.restaurante.horarios_json) {
               try {
-                const sched = typeof data.restaurante.horarios_json === 'string' 
-                  ? JSON.parse(data.restaurante.horarios_json) 
+                const sched = typeof data.restaurante.horarios_json === 'string'
+                  ? JSON.parse(data.restaurante.horarios_json)
                   : data.restaurante.horarios_json;
                 restaurantSchedules[restauranteId] = sched;
               } catch(e) { console.warn(`[${restauranteId}] Error parseando horarios:`, e.message); }
@@ -336,8 +342,8 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] Mensaje de ${from}: ${JSON.stringify(body.substring(0, 60))}`);
     logActivity(restauranteId, { type: 'in', text: `${from}: ${body.substring(0, 40)}` });
 
-    // Link único y seguro — siempre funciona independiente de slugs
-    const storeLink = `${STORE_URL}/tienda.html?r=${restauranteId}`;
+    // Link siempre usa el baseId (sin nonce) para que la tienda lo encuentre en la DB
+    const storeLink = `${STORE_URL}/tienda.html?r=${baseId}`;
     const restName  = restaurantNames[restauranteId] || 'nuestro restaurante';
     const bl        = body.toLowerCase();
 
@@ -346,7 +352,7 @@ function createSession(restauranteId) {
 
     // --- PEDIDO ACTIVO: no responder si el cliente ya tiene un pedido en proceso ---
     try {
-      const activeRes = await fetch(`${API_URL}/pedidos/activo?restaurante_id=${restauranteId}&telefono=${from}`);
+      const activeRes = await fetch(`${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${from}`);
       if (activeRes.ok) {
         const activeData = await activeRes.json();
         if (activeData.activo) {
@@ -376,7 +382,7 @@ function createSession(restauranteId) {
 
     try {
       let texto;
-      const finalLink = `${STORE_URL}/tienda.html?r=${restauranteId}`;
+      const finalLink = `${STORE_URL}/tienda.html?r=${baseId}`;
 
       if (bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/)) {
         texto = `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n👉 Haz tu pedido aquí:\n${finalLink}`;
