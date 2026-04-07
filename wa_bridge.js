@@ -102,6 +102,41 @@ async function clearSessionData(id) {
   return false;
 }
 
+/**
+ * Sincroniza datos del restaurante desde la API (nombre, horarios, mensajes, etc.)
+ * Se llama al conectar WhatsApp, cada 15 min, y también vía POST /sync para aplicar
+ * cambios del panel de admin de forma inmediata.
+ */
+function syncRestaurantData(restauranteId, baseId, retries = 3) {
+  fetch(`${API_URL}/tienda?r=${baseId}`)
+    .then(r => r.json())
+    .then(data => {
+      if (data && data.restaurante) {
+        restaurantNames[restauranteId]    = data.restaurante.nombre;
+        restaurantSlugs[restauranteId]    = data.restaurante.slug || null;
+        restaurantLinkPrefs[restauranteId]= data.restaurante.link_preferido || 'slug';
+        restaurantClosedMsgs[restauranteId] = data.restaurante.bot_mensaje_cerrado || null;
+
+        if (data.restaurante.horarios_json) {
+          try {
+            const sched = typeof data.restaurante.horarios_json === 'string'
+              ? JSON.parse(data.restaurante.horarios_json)
+              : data.restaurante.horarios_json;
+            restaurantSchedules[restauranteId] = sched;
+          } catch(e) { console.warn(`[${restauranteId}] Error parseando horarios:`, e.message); }
+        }
+        console.log(`[${restauranteId}] Sincronización OK: ${data.restaurante.nombre}`);
+      } else if (retries > 0) {
+        console.warn(`[${restauranteId}] Datos incompletos — reintentando (${retries})...`);
+        setTimeout(() => syncRestaurantData(restauranteId, baseId, retries - 1), 5000);
+      }
+    })
+    .catch(err => {
+      console.warn(`[${restauranteId}] Fallo en sync: ${err.message}`);
+      if (retries > 0) setTimeout(() => syncRestaurantData(restauranteId, baseId, retries - 1), 10000);
+    });
+}
+
 function createSession(restauranteId) {
   // ID base sin nonce — usado para links a la tienda y llamadas a la API
   // Formato con nonce: "uuid_abc4" → base: "uuid"
@@ -219,39 +254,8 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] ✅ WhatsApp listo (evento ready)`);
     writeSessionConnected();
 
-    // Cargar nombre del restaurante y slug periódicamente — usar baseId para la API
-    const syncInfo = (retries = 3) => {
-      fetch(`${API_URL}/tienda?r=${baseId}`)
-        .then(r => r.json())
-        .then(data => {
-          if (data && data.restaurante) {
-            restaurantNames[restauranteId] = data.restaurante.nombre;
-            restaurantSlugs[restauranteId] = data.restaurante.slug || null;
-            restaurantLinkPrefs[restauranteId] = data.restaurante.link_preferido || 'slug';
-            restaurantClosedMsgs[restauranteId] = data.restaurante.bot_mensaje_cerrado || null;
-
-            if (data.restaurante.horarios_json) {
-              try {
-                const sched = typeof data.restaurante.horarios_json === 'string'
-                  ? JSON.parse(data.restaurante.horarios_json)
-                  : data.restaurante.horarios_json;
-                restaurantSchedules[restauranteId] = sched;
-              } catch(e) { console.warn(`[${restauranteId}] Error parseando horarios:`, e.message); }
-            }
-            console.log(`[${restauranteId}] Sincronización OK: ${data.restaurante.nombre}`);
-          } else if (retries > 0) {
-            console.warn(`[${restauranteId}] Datos incompletos — reintentando (${retries})...`);
-            setTimeout(() => syncInfo(retries - 1), 5000);
-          }
-        })
-        .catch(err => {
-          console.warn(`[${restauranteId}] Fallo en sync: ${err.message}`);
-          if (retries > 0) setTimeout(() => syncInfo(retries - 1), 10000);
-        });
-    };
-
-    syncInfo();
-    setInterval(() => syncInfo(1), 15 * 60 * 1000);
+    syncRestaurantData(restauranteId, baseId);
+    setInterval(() => syncRestaurantData(restauranteId, baseId, 1), 15 * 60 * 1000);
 
     // Iniciar watchdog: verifica cada 3 min que el cliente sigue activo
     lastMsgTs[restauranteId] = Date.now();
@@ -622,6 +626,25 @@ app.post('/notify', async (req, res) => {
   }
 });
 
+// Sincronización inmediata de datos del restaurante (horarios, mensajes, etc.)
+// POST /sync { restaurante_id }  — llamado por actualizar.php tras guardar
+app.post('/sync', (req, res) => {
+  const { restaurante_id } = req.body;
+  if (!restaurante_id) return res.status(400).json({ error: 'Falta restaurante_id' });
+
+  const found = findClientByBaseId(restaurante_id);
+  if (!found) return res.status(404).json({ error: 'Sesión no activa' });
+
+  const { sessionId } = found;
+  const baseId = sessionId.includes('_')
+    ? sessionId.substring(0, sessionId.lastIndexOf('_'))
+    : sessionId;
+
+  syncRestaurantData(sessionId, baseId);
+  console.log(`[${sessionId}] 🔄 Sincronización forzada desde panel de admin`);
+  res.json({ ok: true });
+});
+
 // ====== ENDPOINTS INBOX CHAT REAL ======
 app.get('/session/:id/chats', async (req, res) => {
   const id = req.params.id;
@@ -721,6 +744,15 @@ setInterval(() => {
  * Devuelve la próxima hora de apertura del restaurante (para reemplazar {hora_apertura}).
  * Si el restaurante abre más tarde hoy, devuelve "HH:MM". Si no abre hoy, indica el día.
  */
+/** Convierte "HH:MM" (24h) a "H:MMam/pm" → ej: "11:00" → "11:00am", "13:30" → "1:30pm" */
+function to12h(time24) {
+  const [h, m] = time24.split(':').map(Number);
+  const suffix = h < 12 ? 'am' : 'pm';
+  const h12 = h % 12 || 12;
+  const mm = String(m).padStart(2, '0');
+  return `${h12}:${mm}${suffix}`;
+}
+
 function getNextOpeningTime(restauranteId) {
   const sched = restaurantSchedules[restauranteId];
   if (!sched || !Array.isArray(sched) || sched.length !== 7) return null;
@@ -740,7 +772,7 @@ function getNextOpeningTime(restauranteId) {
   const todaySched = sched[todayIdx];
   if (todaySched && todaySched.open) {
     const [startH, startM] = todaySched.from.split(':').map(Number);
-    if (startH * 60 + startM > currentMins) return `las ${todaySched.from}`;
+    if (startH * 60 + startM > currentMins) return to12h(todaySched.from);
   }
 
   // Buscar el siguiente día que abra (hasta 7 días)
@@ -748,8 +780,11 @@ function getNextOpeningTime(restauranteId) {
     const nextIdx = (todayIdx + i) % 7;
     const nextSched = sched[nextIdx];
     if (nextSched && nextSched.open) {
-      const dayLabel = i === 1 ? 'mañana' : `el ${dayNames[nextIdx]}`;
-      return `${dayLabel} a las ${nextSched.from}`;
+      // Retorna hora en formato 12h + referencia de día, encaja después de "a las"
+      // Ej: "11:00am de mañana"  →  "Abrimos a las 11:00am de mañana"
+      //     "11:00am del Martes" →  "Abrimos a las 11:00am del Martes"
+      const dayLabel = i === 1 ? 'de mañana' : `del ${dayNames[nextIdx]}`;
+      return `${to12h(nextSched.from)} ${dayLabel}`;
     }
   }
   return null;
