@@ -376,8 +376,8 @@ function createSession(restauranteId) {
     logActivity(restauranteId, { type: 'in', text: `${from}: ${body.substring(0, 40)}` });
 
     // Link siempre usa el baseId (sin nonce) para que la tienda lo encuentre en la DB
-    // Incluye el teléfono real del cliente para pre-llenar el campo WhatsApp en el checkout
-    const storeLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${realPhone}`;
+    // Incluye teléfono real y el chatId completo para garantizar entrega de notificaciones
+    const storeLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${realPhone}&cid=${encodeURIComponent(fullChatId)}`;
     const restName  = restaurantNames[restauranteId] || 'nuestro restaurante';
     const bl        = body.toLowerCase();
 
@@ -422,7 +422,7 @@ function createSession(restauranteId) {
 
     try {
       let texto;
-      const finalLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${realPhone}`;
+      const finalLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${realPhone}&cid=${encodeURIComponent(fullChatId)}`;
 
       if (bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/)) {
         texto = `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n👉 Haz tu pedido aquí:\n${finalLink}`;
@@ -591,10 +591,10 @@ function findClientByBaseId(baseId) {
 }
 
 // Enviar mensaje WA a un teléfono desde la tienda
-// POST /notify { restaurante_id, phone, message }
+// POST /notify { restaurante_id, phone, message, chat_id? }
 app.post('/notify', async (req, res) => {
-  const { restaurante_id, phone, message } = req.body;
-  if (!restaurante_id || !phone || !message) return res.status(400).json({ error: 'Faltan datos' });
+  const { restaurante_id, phone, message, chat_id } = req.body;
+  if (!restaurante_id || !message || (!phone && !chat_id)) return res.status(400).json({ error: 'Faltan datos' });
 
   const found = findClientByBaseId(restaurante_id);
   if (!found) {
@@ -603,12 +603,16 @@ app.post('/notify', async (req, res) => {
   }
   const { client, sessionId } = found;
   try {
-    // Buscar chatId real en el mapa (resuelve cuentas @lid y otros formatos especiales)
-    // Fallback: construir @c.us si el cliente no ha interactuado aún en esta sesión
-    const phoneNorm = normalizePhone(phone);
-    const mappedChatId = chatIdMap[restaurante_id] && chatIdMap[restaurante_id][phoneNorm];
-    const chatId = mappedChatId || (phoneNorm + '@c.us');
-    console.log(`[${sessionId}] Enviando notificación → chatId=${chatId} (mapeado=${!!mappedChatId})`);
+    // Prioridad: 1) chat_id directo del URL (resuelve @lid), 2) mapa en memoria, 3) construir @c.us
+    let chatId;
+    if (chat_id) {
+      chatId = chat_id;
+    } else {
+      const phoneNorm = normalizePhone(phone);
+      const mappedChatId = chatIdMap[restaurante_id] && chatIdMap[restaurante_id][phoneNorm];
+      chatId = mappedChatId || (phoneNorm + '@c.us');
+    }
+    console.log(`[${sessionId}] Enviando notificación → chatId=${chatId}`);
     await client.sendMessage(chatId, message);
     logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: ${message.substring(0, 40)}` });
     res.json({ ok: true });
