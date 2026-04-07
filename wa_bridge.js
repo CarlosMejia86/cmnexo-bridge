@@ -33,6 +33,10 @@ const sessions = {};
 const DATA_DIR = path.join(__dirname, '.wwebjs_auth');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// Mapa chatId real por teléfono normalizado: { restauranteId: { phone10: fullChatId } }
+// Permite enviar notificaciones al chatId correcto aunque sea @lid u otro formato
+const chatIdMap = {};
+
 // Store de actividad reciente por restaurante (últimos 50 mensajes en memoria)
 const activityStore = {};
 function logActivity(restauranteId, entry) {
@@ -328,7 +332,22 @@ function createSession(restauranteId) {
     if (msg.from.endsWith('@g.us')) return;
     if (msg.isGroupMsg) return;
 
+    // chatId completo tal como WhatsApp lo conoce (puede ser @c.us o @lid)
+    const fullChatId = msg.from;
+    // Número sin sufijo — usado para comparaciones internas y activo check
     const from = msg.from.replace(/@\S+$/, '');
+
+    // Obtener número de teléfono real del contacto (resuelve cuentas @lid)
+    let realPhone = from;
+    try {
+      const contact = await msg.getContact();
+      if (contact && contact.number) realPhone = contact.number;
+    } catch(e) { /* usar from como fallback */ }
+
+    // Guardar mapa teléfono normalizado → chatId real para notificaciones correctas
+    const phoneKey = normalizePhone(realPhone);
+    if (!chatIdMap[restauranteId]) chatIdMap[restauranteId] = {};
+    chatIdMap[restauranteId][phoneKey] = fullChatId;
 
     // Extraer texto del mensaje — WA Web varía según versión y tipo
     const rawBody = (
@@ -357,8 +376,8 @@ function createSession(restauranteId) {
     logActivity(restauranteId, { type: 'in', text: `${from}: ${body.substring(0, 40)}` });
 
     // Link siempre usa el baseId (sin nonce) para que la tienda lo encuentre en la DB
-    // Incluye el teléfono del cliente para pre-llenar el campo WhatsApp en el checkout
-    const storeLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${from}`;
+    // Incluye el teléfono real del cliente para pre-llenar el campo WhatsApp en el checkout
+    const storeLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${realPhone}`;
     const restName  = restaurantNames[restauranteId] || 'nuestro restaurante';
     const bl        = body.toLowerCase();
 
@@ -403,7 +422,7 @@ function createSession(restauranteId) {
 
     try {
       let texto;
-      const finalLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${from}`;
+      const finalLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${realPhone}`;
 
       if (bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/)) {
         texto = `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n👉 Haz tu pedido aquí:\n${finalLink}`;
@@ -584,8 +603,12 @@ app.post('/notify', async (req, res) => {
   }
   const { client, sessionId } = found;
   try {
-    const chatId = normalizePhone(phone) + '@c.us';
-    console.log(`[${sessionId}] Enviando notificación → chatId=${chatId}`);
+    // Buscar chatId real en el mapa (resuelve cuentas @lid y otros formatos especiales)
+    // Fallback: construir @c.us si el cliente no ha interactuado aún en esta sesión
+    const phoneNorm = normalizePhone(phone);
+    const mappedChatId = chatIdMap[restaurante_id] && chatIdMap[restaurante_id][phoneNorm];
+    const chatId = mappedChatId || (phoneNorm + '@c.us');
+    console.log(`[${sessionId}] Enviando notificación → chatId=${chatId} (mapeado=${!!mappedChatId})`);
     await client.sendMessage(chatId, message);
     logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: ${message.substring(0, 40)}` });
     res.json({ ok: true });
