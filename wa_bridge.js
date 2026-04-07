@@ -328,7 +328,7 @@ function createSession(restauranteId) {
     if (msg.from.endsWith('@g.us')) return;
     if (msg.isGroupMsg) return;
 
-    const from = msg.from.replace('@c.us', '');
+    const from = msg.from.replace(/@\S+$/, '');
 
     // Extraer texto del mensaje — WA Web varía según versión y tipo
     const rawBody = (
