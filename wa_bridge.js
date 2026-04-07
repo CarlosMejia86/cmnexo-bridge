@@ -357,7 +357,8 @@ function createSession(restauranteId) {
     logActivity(restauranteId, { type: 'in', text: `${from}: ${body.substring(0, 40)}` });
 
     // Link siempre usa el baseId (sin nonce) para que la tienda lo encuentre en la DB
-    const storeLink = `${STORE_URL}/tienda.html?r=${baseId}`;
+    // Incluye el teléfono del cliente para pre-llenar el campo WhatsApp en el checkout
+    const storeLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${from}`;
     const restName  = restaurantNames[restauranteId] || 'nuestro restaurante';
     const bl        = body.toLowerCase();
 
@@ -366,7 +367,7 @@ function createSession(restauranteId) {
 
     // --- PEDIDO ACTIVO: no responder si el cliente ya tiene un pedido en proceso ---
     try {
-      const activeRes = await fetch(`${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${from}`);
+      const activeRes = await fetch(`${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${from}`, { signal: AbortSignal.timeout(8000) });
       if (activeRes.ok) {
         const activeData = await activeRes.json();
         if (activeData.activo) {
@@ -374,7 +375,11 @@ function createSession(restauranteId) {
           return;
         }
       }
-    } catch(e) { console.warn(`[${restauranteId}] Error verificando pedido activo:`, e.message); }
+    } catch(e) {
+      // Si la API no responde, no enviar mensaje para evitar spam en caso de error temporal
+      console.warn(`[${restauranteId}] Error verificando pedido activo — omitiendo respuesta:`, e.message);
+      return;
+    }
 
     // --- VALIDACIÓN DE HORARIO ---
     const isAskingForHours = bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/);
@@ -398,7 +403,7 @@ function createSession(restauranteId) {
 
     try {
       let texto;
-      const finalLink = `${STORE_URL}/tienda.html?r=${baseId}`;
+      const finalLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${from}`;
 
       if (bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/)) {
         texto = `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n👉 Haz tu pedido aquí:\n${finalLink}`;
