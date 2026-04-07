@@ -386,7 +386,7 @@ function createSession(restauranteId) {
 
     // --- PEDIDO ACTIVO: no responder si el cliente ya tiene un pedido en proceso ---
     try {
-      const activeRes = await fetch(`${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${from}`, { signal: AbortSignal.timeout(8000) });
+      const activeRes = await fetch(`${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${from}&cid=${encodeURIComponent(fullChatId)}`, { signal: AbortSignal.timeout(8000) });
       if (activeRes.ok) {
         const activeData = await activeRes.json();
         if (activeData.activo) {
