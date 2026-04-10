@@ -330,11 +330,23 @@ function createSession(restauranteId) {
     }, 10000);
   });
 
+  // Deduplicador: evita procesar el mismo mensaje dos veces si disparan ambos eventos
+  const _processedMsgIds = new Set();
+
   async function handleMsg(msg) {
     if (!msg || !msg.from) return;
     if (msg.fromMe) return;
     if (msg.from.endsWith('@g.us')) return;
     if (msg.isGroupMsg) return;
+
+    // Deduplicar por ID de mensaje
+    const msgId = msg.id?.id || msg.id?._serialized;
+    if (msgId) {
+      if (_processedMsgIds.has(msgId)) return;
+      _processedMsgIds.add(msgId);
+      // Limpiar el set cada 500 entradas para no crecer indefinidamente
+      if (_processedMsgIds.size > 500) _processedMsgIds.clear();
+    }
 
     // chatId completo tal como WhatsApp lo conoce (puede ser @c.us o @lid)
     const fullChatId = msg.from;
@@ -366,14 +378,11 @@ function createSession(restauranteId) {
 
     console.log(`[${restauranteId}] msg from=${from} type=${msg.type} body=${JSON.stringify(body.substring(0,50))}`);
 
-    // Ignorar mensajes sin texto (audios, imágenes, etc.) pero responder con el link
-    if (!body) {
-      if (msg.type === 'chat' || msg.type === 'text') {
-        // Mensaje de texto pero sin cuerpo detectado — responder igual
-      } else {
-        console.log(`[${restauranteId}] Ignorando msg tipo=${msg.type} sin texto`);
-        return;
-      }
+    // Siempre responder, incluso si el mensaje no tiene texto (imagen, audio, sticker, etc.)
+    // Solo ignorar mensajes de estado de WA
+    if (msg.type === 'e2e_notification' || msg.type === 'notification_template' || msg.type === 'call_log') {
+      console.log(`[${restauranteId}] Ignorando msg de sistema tipo=${msg.type}`);
+      return;
     }
 
     console.log(`[${restauranteId}] Mensaje de ${from}: ${JSON.stringify(body.substring(0, 60))}`);
@@ -406,22 +415,22 @@ function createSession(restauranteId) {
 
     // --- VALIDACIÓN DE HORARIO ---
     const isAskingForHours = bl.match(/horario|horarios|hora|abren|cierran|atenci[oó]n/);
-    if (!isAskingForHours && !isStoreOpen(restauranteId)) {
-      const closedMsg = restaurantClosedMsgs[restauranteId] || "Lo sentimos, por ahora estamos cerrados. Consulta nuestros horarios para saber cuándo volvemos. 🕐";
-      
-      // Reemplazar variables del mensaje de cerrado
+    if (!isAskingForHours && restaurantSchedules[restauranteId] && !isStoreOpen(restauranteId)) {
+      const closedMsg = restaurantClosedMsgs[restauranteId] || `Lo sentimos, por ahora estamos cerrados 🕐\n\nPuedes ver nuestro menú y hacer tu pedido cuando abramos:\n${storeLink}`;
       const nextOpen = getNextOpeningTime(restauranteId);
       const finalClosedMsg = closedMsg
         .replace(/{negocio}/g, restName)
         .replace(/{nombre}/g, 'amigo')
         .replace(/{link_menu}/g, storeLink)
         .replace(/{hora_apertura}/g, nextOpen || 'pronto');
-
       try {
         await client.sendMessage(chatId, finalClosedMsg);
         logActivity(restauranteId, { type: 'out', text: `(Cerrado) ${finalClosedMsg.substring(0, 40)}...` });
-        return; // Detener flujo
-      } catch(e) { console.error(`[${restauranteId}] Error enviando msg cerrado:`, e); }
+        return;
+      } catch(e) {
+        console.error(`[${restauranteId}] Error enviando msg cerrado, enviando bienvenida:`, e);
+        // si falla, caer al mensaje de bienvenida normal
+      }
     }
 
     try {
@@ -449,9 +458,14 @@ function createSession(restauranteId) {
     }
   }
 
-  // Solo 'message' — sin deduplicación que bloquee mensajes legítimos
+  // Escuchar mensajes entrantes — usar ambos eventos para compatibilidad
+  // 'message' = solo entrantes | 'message_create' = todos (filtrar fromMe dentro de handleMsg)
   client.on('message', async (msg) => {
-    try { await handleMsg(msg); } catch(e) { console.error(`[${restauranteId}] Error handleMsg:`, e.message); }
+    try { await handleMsg(msg); } catch(e) { console.error(`[${restauranteId}] Error handleMsg(message):`, e.message); }
+  });
+  client.on('message_create', async (msg) => {
+    if (msg.fromMe) return; // evitar loop: ignorar los mensajes que envía el bot
+    try { await handleMsg(msg); } catch(e) { console.error(`[${restauranteId}] Error handleMsg(message_create):`, e.message); }
   });
 
   sessions[restauranteId] = client;
