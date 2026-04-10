@@ -1,4 +1,4 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode  = require('qrcode');
 const express = require('express');
 const fs      = require('fs');
@@ -595,9 +595,9 @@ function findClientByBaseId(baseId) {
 }
 
 // Enviar mensaje WA a un teléfono desde la tienda
-// POST /notify { restaurante_id, phone, message, chat_id? }
+// POST /notify { restaurante_id, phone, message, chat_id?, image_url? }
 app.post('/notify', async (req, res) => {
-  const { restaurante_id, phone, message, chat_id } = req.body;
+  const { restaurante_id, phone, message, chat_id, image_url } = req.body;
   if (!restaurante_id || !message || (!phone && !chat_id)) return res.status(400).json({ error: 'Faltan datos' });
 
   const found = findClientByBaseId(restaurante_id);
@@ -607,7 +607,7 @@ app.post('/notify', async (req, res) => {
   }
   const { client, sessionId } = found;
   try {
-    // Prioridad: 1) chat_id directo del URL (resuelve @lid), 2) mapa en memoria, 3) construir @c.us
+    // Prioridad: 1) chat_id directo, 2) mapa en memoria, 3) construir @c.us
     let chatId;
     if (chat_id) {
       chatId = chat_id;
@@ -616,9 +616,24 @@ app.post('/notify', async (req, res) => {
       const mappedChatId = chatIdMap[restaurante_id] && chatIdMap[restaurante_id][phoneNorm];
       chatId = mappedChatId || (phoneNorm + '@c.us');
     }
-    console.log(`[${sessionId}] Enviando notificación → chatId=${chatId}`);
-    await client.sendMessage(chatId, message);
-    logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: ${message.substring(0, 40)}` });
+    console.log(`[${sessionId}] Enviando notificación → chatId=${chatId}${image_url ? ' (con imagen)' : ''}`);
+
+    if (image_url) {
+      // Enviar imagen con caption
+      try {
+        const media = await MessageMedia.fromUrl(image_url, { unsafeMime: true });
+        await client.sendMessage(chatId, media, { caption: message });
+        logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: 🖼️ ${message.substring(0, 30)}` });
+      } catch(imgErr) {
+        console.warn(`[${sessionId}] Error cargando imagen, enviando solo texto:`, imgErr.message);
+        await client.sendMessage(chatId, message);
+        logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: ${message.substring(0, 40)}` });
+      }
+    } else {
+      await client.sendMessage(chatId, message);
+      logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: ${message.substring(0, 40)}` });
+    }
+
     res.json({ ok: true });
   } catch(e) {
     console.error(`[${sessionId}] Error enviando notificación a ${phone}:`, e.message);
