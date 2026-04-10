@@ -399,9 +399,9 @@ function createSession(restauranteId) {
         }
       }
     } catch(e) {
-      // Si la API no responde, no enviar mensaje para evitar spam en caso de error temporal
-      console.warn(`[${restauranteId}] Error verificando pedido activo — omitiendo respuesta:`, e.message);
-      return;
+      // Si la API falla, continuar y enviar el mensaje de bienvenida de todas formas
+      console.warn(`[${restauranteId}] Error verificando pedido activo (continuando con bienvenida):`, e.message);
+      // NO return — no bloquear el mensaje de bienvenida por un fallo de API
     }
 
     // --- VALIDACIÓN DE HORARIO ---
