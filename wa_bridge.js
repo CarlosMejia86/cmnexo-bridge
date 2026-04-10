@@ -729,6 +729,32 @@ app.post('/session/:id/chat/:chatId/send', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+// ── Publicar estado de WhatsApp ──────────────────────────────
+// POST /status { restaurante_id, image_url, caption? }
+app.post('/status', async (req, res) => {
+  const { restaurante_id, image_url, caption } = req.body;
+  if (!restaurante_id || !image_url) return res.status(400).json({ error: 'Faltan datos' });
+
+  // Buscar cualquier sesión activa del restaurante
+  const sessionId = Object.keys(sessions).find(k => k === String(restaurante_id) || k.startsWith(String(restaurante_id) + '_'));
+  const client = sessions[sessionId];
+  if (!client || !client.info) return res.status(400).json({ error: 'Sin sesión activa. Conecta WhatsApp primero.' });
+
+  try {
+    const { MessageMedia } = require('whatsapp-web.js');
+    const media = await MessageMedia.fromUrl(image_url, { unsafeMime: true });
+    // Publicar en estado (@status@broadcast)
+    await client.sendMessage('status@broadcast', media, {
+      caption: caption || '',
+      sendMediaAsSticker: false,
+    });
+    console.log(`[/status] Estado publicado restaurante_id=${restaurante_id}`);
+    res.json({ success: true });
+  } catch (e) {
+    console.error(`[/status] Error:`, e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 // ========================================
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 Servidor Express vivo en puerto ${PORT}`);
