@@ -398,19 +398,33 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] Respondiendo a chatId=${chatId} | Link: ${storeLink}`);
 
     // --- PEDIDO ACTIVO: no responder si el cliente ya tiene un pedido en proceso ---
-    try {
-      const activeRes = await fetch(`${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${from}&cid=${encodeURIComponent(fullChatId)}`, { signal: AbortSignal.timeout(8000) });
-      if (activeRes.ok) {
-        const activeData = await activeRes.json();
-        if (activeData.activo) {
-          console.log(`[${restauranteId}] Cliente ${from} tiene pedido activo — sin respuesta automática`);
+    // Usar realPhone (número real resuelto) para mayor precisión en la búsqueda
+    // Intentar con realPhone primero; si falla, reintentar con `from`
+    let tieneActivo = false;
+    for (const telParam of [realPhone, from]) {
+      try {
+        const activeRes = await fetch(
+          `${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${encodeURIComponent(telParam)}&cid=${encodeURIComponent(fullChatId)}`,
+          { signal: AbortSignal.timeout(6000) }
+        );
+        if (activeRes.ok) {
+          const activeData = await activeRes.json();
+          if (activeData.activo) { tieneActivo = true; break; }
+          break; // respuesta válida (false) → no reintentar con el otro número
+        }
+      } catch(e) {
+        console.warn(`[${restauranteId}] Error verificando pedido activo con tel=${telParam}:`, e.message);
+        // Si el primer intento (realPhone) falla por red, probar con `from`
+        if (telParam === from) {
+          // Ambos fallaron: para evitar enviar durante un pedido activo, bloquear
+          console.warn(`[${restauranteId}] No se pudo verificar pedido activo — silenciando respuesta automática`);
           return;
         }
       }
-    } catch(e) {
-      // Si la API falla, continuar y enviar el mensaje de bienvenida de todas formas
-      console.warn(`[${restauranteId}] Error verificando pedido activo (continuando con bienvenida):`, e.message);
-      // NO return — no bloquear el mensaje de bienvenida por un fallo de API
+    }
+    if (tieneActivo) {
+      console.log(`[${restauranteId}] Cliente ${realPhone} tiene pedido activo — sin respuesta automática`);
+      return;
     }
 
     // --- VALIDACIÓN DE HORARIO ---
