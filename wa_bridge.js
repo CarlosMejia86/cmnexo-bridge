@@ -7,7 +7,7 @@ const cors    = require('cors');
 
 const app     = express();
 app.use(cors());
-app.use(express.json({ limit: '20mb' })); // Permite payloads grandes (base64 de imágenes)
+app.use(express.json());
 
 const PORT      = process.env.PORT      || 3000;
 const API_URL   = process.env.API_URL   || 'https://cmnexo.com/api';
@@ -595,9 +595,9 @@ function findClientByBaseId(baseId) {
 }
 
 // Enviar mensaje WA a un teléfono desde la tienda
-// POST /notify { restaurante_id, phone, message, chat_id?, image_url?, image_data?, image_mime? }
+// POST /notify { restaurante_id, phone, message, chat_id?, image_url? }
 app.post('/notify', async (req, res) => {
-  const { restaurante_id, phone, message, chat_id, image_url, image_data, image_mime } = req.body;
+  const { restaurante_id, phone, message, chat_id, image_url } = req.body;
   if (!restaurante_id || !message || (!phone && !chat_id)) return res.status(400).json({ error: 'Faltan datos' });
 
   const found = findClientByBaseId(restaurante_id);
@@ -616,36 +616,16 @@ app.post('/notify', async (req, res) => {
       const mappedChatId = chatIdMap[restaurante_id] && chatIdMap[restaurante_id][phoneNorm];
       chatId = mappedChatId || (phoneNorm + '@c.us');
     }
+    console.log(`[${sessionId}] Enviando notificación → chatId=${chatId}${image_url ? ' (con imagen)' : ''}`);
 
-    const hasImage = image_data || image_url;
-    console.log(`[${sessionId}] Enviando notificación → chatId=${chatId}${hasImage ? ' (con imagen)' : ''}`);
-
-    if (hasImage) {
-      let media = null;
-      // Opción 1: base64 enviado directamente (más confiable)
-      if (image_data && image_mime) {
-        try {
-          media = new MessageMedia(image_mime, image_data, 'marketing.' + (image_mime.split('/')[1] || 'jpg'));
-          console.log(`[${sessionId}] Imagen base64 lista (mime=${image_mime})`);
-        } catch(b64Err) {
-          console.warn(`[${sessionId}] Error creando MessageMedia desde base64:`, b64Err.message);
-        }
-      }
-      // Opción 2: URL remota como fallback
-      if (!media && image_url) {
-        try {
-          media = await MessageMedia.fromUrl(image_url, { unsafeMime: true });
-          console.log(`[${sessionId}] Imagen cargada desde URL: ${image_url}`);
-        } catch(urlErr) {
-          console.warn(`[${sessionId}] Error cargando imagen por URL:`, urlErr.message);
-        }
-      }
-      if (media) {
+    if (image_url) {
+      // Enviar imagen con caption usando MessageMedia.fromUrl
+      try {
+        const media = await MessageMedia.fromUrl(image_url, { unsafeMime: true });
         await client.sendMessage(chatId, media, { caption: message });
         logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: 🖼️ ${message.substring(0, 30)}` });
-      } else {
-        // Fallback final: solo texto
-        console.warn(`[${sessionId}] No se pudo cargar imagen, enviando solo texto`);
+      } catch(imgErr) {
+        console.warn(`[${sessionId}] Error cargando imagen, enviando solo texto:`, imgErr.message);
         await client.sendMessage(chatId, message);
         logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: ${message.substring(0, 40)}` });
       }
