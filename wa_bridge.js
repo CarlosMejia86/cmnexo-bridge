@@ -13,7 +13,7 @@ const PORT      = process.env.PORT      || 3000;
 const API_URL   = process.env.API_URL   || 'https://cmnexo.com/api';
 const STORE_URL = process.env.STORE_URL || 'https://cmnexo.com';
 
-console.log('=== CMNexo WA Bridge v1.2.0 iniciando ===');
+console.log('=== CMNexo WA Bridge v1.3.0 iniciando (image support) ===');
 
 /**
  * Normaliza un número de teléfono a formato internacional sin + ni espacios.
@@ -471,10 +471,11 @@ function createSession(restauranteId) {
   return client;
 }
 
-app.get('/', (req, res) => res.json({ 
-  status: 'online', 
-  service: 'CMNexo WA Bridge', 
-  version: '1.1.0',
+app.get('/', (req, res) => res.json({
+  status: 'online',
+  service: 'CMNexo WA Bridge',
+  version: '1.3.0',
+  image_support: true,
   data_dir: fs.existsSync(DATA_DIR) ? 'active' : 'missing'
 }));
 
