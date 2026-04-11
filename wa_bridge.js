@@ -52,6 +52,7 @@ const restaurantLinkPrefs = {};
 const restaurantSchedules = {};
 const restaurantClosedMsgs = {};
 const restaurantWelcomeMsgs = {};
+const restaurantDeliveryTimes = {};
 
 // Watchdog: timestamp del último mensaje recibido por sesión
 const lastMsgTs = {};
@@ -113,11 +114,12 @@ function syncRestaurantData(restauranteId, baseId, retries = 3) {
     .then(r => r.json())
     .then(data => {
       if (data && data.restaurante) {
-        restaurantNames[restauranteId]       = data.restaurante.nombre;
-        restaurantSlugs[restauranteId]       = data.restaurante.slug || null;
-        restaurantLinkPrefs[restauranteId]   = data.restaurante.link_preferido || 'slug';
-        restaurantClosedMsgs[restauranteId]  = data.restaurante.bot_mensaje_cerrado || null;
-        restaurantWelcomeMsgs[restauranteId] = data.restaurante.bot_bienvenida || null;
+        restaurantNames[restauranteId]         = data.restaurante.nombre;
+        restaurantSlugs[restauranteId]         = data.restaurante.slug || null;
+        restaurantLinkPrefs[restauranteId]     = data.restaurante.link_preferido || 'slug';
+        restaurantClosedMsgs[restauranteId]    = data.restaurante.bot_mensaje_cerrado || null;
+        restaurantWelcomeMsgs[restauranteId]   = data.restaurante.bot_bienvenida || null;
+        restaurantDeliveryTimes[restauranteId] = parseInt(data.restaurante.tiempo_entrega) || 25;
 
         if (data.restaurante.horarios_json) {
           try {
@@ -455,7 +457,8 @@ function createSession(restauranteId) {
         texto = `🕐 *Horarios:*\n\nLun–Vie: 11:00am – 10:00pm\nSáb: 11:00am – 11:00pm\nDom: Cerrado\n\n👉 Haz tu pedido aquí:\n${storeLink}`;
         logActivity(restauranteId, { type: 'out', text: 'Respuesta: Horarios' });
       } else if (bl.match(/domicilio|delivery|env[ií]o|despacho|llevan/)) {
-        texto = `🛵 Sí hacemos domicilios. Tiempo estimado: 25–40 min.\n\n👉 Haz tu pedido aquí:\n${storeLink}`;
+        const dt = restaurantDeliveryTimes[restauranteId] || 25;
+        texto = `🛵 Sí hacemos domicilios. Tiempo estimado: ${dt}–${dt + 15} min.\n\n👉 Haz tu pedido aquí:\n${storeLink}`;
         logActivity(restauranteId, { type: 'out', text: 'Respuesta: Domicilios' });
       } else {
         // Saludo de apertura: personalizado (bot_bienvenida) o genérico
@@ -588,6 +591,7 @@ app.post('/session/:id/disconnect', async (req, res) => {
     delete restaurantNames[baseId];
     delete restaurantSlugs[baseId];
     delete restaurantWelcomeMsgs[baseId];
+    delete restaurantDeliveryTimes[baseId];
     delete lastMsgTs[baseId];
   }
 
@@ -596,6 +600,7 @@ app.post('/session/:id/disconnect', async (req, res) => {
   delete restaurantNames[id];
   delete restaurantSlugs[id];
   delete restaurantWelcomeMsgs[id];
+  delete restaurantDeliveryTimes[id];
   delete lastMsgTs[id];
 
   console.log(`[${id}] ✅ Desconexión y limpieza completada`);
