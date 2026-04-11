@@ -51,6 +51,7 @@ const restaurantSlugs = {};
 const restaurantLinkPrefs = {};
 const restaurantSchedules = {};
 const restaurantClosedMsgs = {};
+const restaurantWelcomeMsgs = {};
 
 // Watchdog: timestamp del último mensaje recibido por sesión
 const lastMsgTs = {};
@@ -112,10 +113,11 @@ function syncRestaurantData(restauranteId, baseId, retries = 3) {
     .then(r => r.json())
     .then(data => {
       if (data && data.restaurante) {
-        restaurantNames[restauranteId]    = data.restaurante.nombre;
-        restaurantSlugs[restauranteId]    = data.restaurante.slug || null;
-        restaurantLinkPrefs[restauranteId]= data.restaurante.link_preferido || 'slug';
-        restaurantClosedMsgs[restauranteId] = data.restaurante.bot_mensaje_cerrado || null;
+        restaurantNames[restauranteId]       = data.restaurante.nombre;
+        restaurantSlugs[restauranteId]       = data.restaurante.slug || null;
+        restaurantLinkPrefs[restauranteId]   = data.restaurante.link_preferido || 'slug';
+        restaurantClosedMsgs[restauranteId]  = data.restaurante.bot_mensaje_cerrado || null;
+        restaurantWelcomeMsgs[restauranteId] = data.restaurante.bot_bienvenida || null;
 
         if (data.restaurante.horarios_json) {
           try {
@@ -458,7 +460,16 @@ function createSession(restauranteId) {
         texto = `🛵 Sí hacemos domicilios. Tiempo estimado: 25–40 min.\n\n👉 Haz tu pedido aquí:\n${finalLink}`;
         logActivity(restauranteId, { type: 'out', text: 'Respuesta: Domicilios' });
       } else {
-        texto = `¡Hola! 👋 Bienvenido a *${restName}*.\n\n🛒 Haz tu pedido aquí:\n${finalLink}\n\nSelecciona tus productos, elige adiciones y confirma en segundos. 😊`;
+        const customWelcome = restaurantWelcomeMsgs[restauranteId];
+        if (customWelcome) {
+          texto = customWelcome
+            .replace(/{negocio}/g, restName)
+            .replace(/{nombre}/g, 'amigo')
+            .replace(/{link_menu}/g, finalLink)
+            .replace(/{hora_apertura}/g, '');
+        } else {
+          texto = `¡Hola! 👋 Bienvenido a *${restName}*.\n\n🛒 Haz tu pedido aquí:\n${finalLink}\n\nSelecciona tus productos, elige adiciones y confirma en segundos. 😊`;
+        }
         logActivity(restauranteId, { type: 'out', text: `Saludo enviado (${restName})` });
       }
 
@@ -581,6 +592,7 @@ app.post('/session/:id/disconnect', async (req, res) => {
     delete activityStore[baseId];
     delete restaurantNames[baseId];
     delete restaurantSlugs[baseId];
+    delete restaurantWelcomeMsgs[baseId];
     delete lastMsgTs[baseId];
   }
 
@@ -588,6 +600,7 @@ app.post('/session/:id/disconnect', async (req, res) => {
   delete activityStore[id];
   delete restaurantNames[id];
   delete restaurantSlugs[id];
+  delete restaurantWelcomeMsgs[id];
   delete lastMsgTs[id];
 
   console.log(`[${id}] ✅ Desconexión y limpieza completada`);
