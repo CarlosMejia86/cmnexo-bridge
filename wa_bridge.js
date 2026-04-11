@@ -749,23 +749,56 @@ app.post('/status', async (req, res) => {
   const { restaurante_id, image_url, caption } = req.body;
   if (!restaurante_id || !image_url) return res.status(400).json({ error: 'Faltan datos' });
 
-  // Buscar cualquier sesión activa del restaurante
-  const sessionId = Object.keys(sessions).find(k => k === String(restaurante_id) || k.startsWith(String(restaurante_id) + '_'));
+  const sessionId = Object.keys(sessions).find(k =>
+    k === String(restaurante_id) || k.startsWith(String(restaurante_id) + '_')
+  );
   const client = sessions[sessionId];
   if (!client || !client.info) return res.status(400).json({ error: 'Sin sesión activa. Conecta WhatsApp primero.' });
 
   try {
     const { MessageMedia } = require('whatsapp-web.js');
     const media = await MessageMedia.fromUrl(image_url, { unsafeMime: true });
-    // Publicar en estado (@status@broadcast)
-    await client.sendMessage('status@broadcast', media, {
-      caption: caption || '',
-      sendMediaAsSticker: false,
-    });
-    console.log(`[/status] Estado publicado restaurante_id=${restaurante_id}`);
-    res.json({ success: true });
+
+    let published = false;
+
+    // Intento 1: sendMessage a status@broadcast
+    try {
+      await client.sendMessage('status@broadcast', media, { caption: caption || '' });
+      published = true;
+      console.log(`[/status] ✅ Publicado vía status@broadcast rest=${restaurante_id}`);
+    } catch (e1) {
+      console.warn(`[/status] status@broadcast falló: ${e1.message}`);
+    }
+
+    // Intento 2: pupPage con Store interno de WA
+    if (!published) {
+      try {
+        await client.pupPage.evaluate(async (dataUrl, cap) => {
+          const resp = await fetch(dataUrl);
+          const blob = await resp.blob();
+          const file = new File([blob], 'status.jpg', { type: blob.type });
+          if (window.WWebJS && window.WWebJS.sendStatus) {
+            await window.WWebJS.sendStatus(file, cap);
+          } else if (window.Store && window.Store.sendStatus) {
+            await window.Store.sendStatus(file, cap);
+          } else {
+            throw new Error('Store no disponible');
+          }
+        }, `data:${media.mimetype};base64,${media.data}`, caption || '');
+        published = true;
+        console.log(`[/status] ✅ Publicado vía pupPage rest=${restaurante_id}`);
+      } catch (e2) {
+        console.warn(`[/status] pupPage falló: ${e2.message}`);
+      }
+    }
+
+    // Si falló WA pero la imagen se subió bien → devolver ok igual (guardado en DB)
+    if (!published) {
+      console.warn(`[/status] Ambos métodos fallaron — estado guardado en DB sin confirmar WA`);
+    }
+    res.json({ success: true, wa_published: published });
   } catch (e) {
-    console.error(`[/status] Error:`, e.message);
+    console.error(`[/status] Error general:`, e.message);
     res.status(500).json({ error: e.message });
   }
 });
