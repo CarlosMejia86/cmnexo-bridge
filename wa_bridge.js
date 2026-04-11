@@ -458,19 +458,13 @@ function createSession(restauranteId) {
         texto = `🛵 Sí hacemos domicilios. Tiempo estimado: 25–40 min.\n\n👉 Haz tu pedido aquí:\n${storeLink}`;
         logActivity(restauranteId, { type: 'out', text: 'Respuesta: Domicilios' });
       } else {
-        const customWelcome = restaurantWelcomeMsgs[restauranteId];
-        if (customWelcome) {
-          const hasLink = customWelcome.includes('{link_menu}');
-          texto = customWelcome
-            .replace(/{negocio}/g, restName)
-            .replace(/{nombre}/g, 'amigo')
-            .replace(/{link_menu}/g, storeLink)
-            .replace(/{hora_apertura}/g, '');
-          // Si el mensaje personalizado no incluía el link, agregarlo siempre al final
-          if (!hasLink) texto += `\n\n🛒 Haz tu pedido aquí:\n${storeLink}`;
-        } else {
-          texto = `¡Hola! 👋 Bienvenido a *${restName}*.\n\n🛒 Haz tu pedido aquí:\n${storeLink}\n\nSelecciona tus productos, elige adiciones y confirma en segundos. 😊`;
-        }
+        // Saludo de apertura: personalizado (bot_bienvenida) o genérico
+        const customGreeting = restaurantWelcomeMsgs[restauranteId];
+        const greeting = customGreeting
+          ? customGreeting.replace(/{negocio}/g, restName).replace(/{nombre}/g, 'amigo').replace(/{link_menu}/g, storeLink).replace(/{hora_apertura}/g, '')
+          : `¡Hola! 👋 Bienvenido a *${restName}*.`;
+
+        texto = `${greeting}\n\n🛒 Haz tu pedido aquí:\n${storeLink}\n\nSelecciona tus productos, elige adiciones y confirma en segundos. 😊`;
         logActivity(restauranteId, { type: 'out', text: `Saludo enviado (${restName})` });
       }
 
