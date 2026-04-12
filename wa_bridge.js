@@ -22,10 +22,10 @@ console.log('=== CMNexo WA Bridge v1.3.0 iniciando (image support) ===');
  *          "+57 300 123 4567" → "573001234567"
  *          "573001234567" → "573001234567"
  */
-function normalizePhone(raw) {
+function normalizePhone(raw, indicativo = '57') {
   let n = String(raw).replace(/[^0-9]/g, '');
-  if (n.startsWith('0') && n.length >= 10) n = '57' + n.substring(1); // marcación nacional
-  if (n.length === 10 && n.startsWith('3'))  n = '57' + n;            // móvil colombiano
+  if (n.startsWith('0') && n.length >= 10) n = indicativo + n.substring(1); // marcación nacional
+  if (n.length === 10 && n.startsWith('3'))  n = indicativo + n;            // móvil local
   return n;
 }
 
@@ -53,6 +53,7 @@ const restaurantSchedules = {};
 const restaurantClosedMsgs = {};
 const restaurantWelcomeMsgs = {};
 const restaurantDeliveryTimes = {};
+const restaurantIndicativos = {};
 
 // Watchdog: timestamp del último mensaje recibido por sesión
 const lastMsgTs = {};
@@ -120,6 +121,7 @@ function syncRestaurantData(restauranteId, baseId, retries = 3) {
         restaurantClosedMsgs[restauranteId]    = data.restaurante.bot_mensaje_cerrado || null;
         restaurantWelcomeMsgs[restauranteId]   = data.restaurante.bot_bienvenida || null;
         restaurantDeliveryTimes[restauranteId] = parseInt(data.restaurante.tiempo_entrega) || 25;
+        restaurantIndicativos[restauranteId]   = data.restaurante.indicativo || '57';
 
         if (data.restaurante.horarios_json) {
           try {
@@ -365,7 +367,8 @@ function createSession(restauranteId) {
     } catch(e) { /* usar from como fallback */ }
 
     // Guardar mapa teléfono normalizado → chatId real para notificaciones correctas
-    const phoneKey = normalizePhone(realPhone);
+    const storeInd = restaurantIndicativos[restauranteId] || '57';
+    const phoneKey = normalizePhone(realPhone, storeInd);
     if (!chatIdMap[restauranteId]) chatIdMap[restauranteId] = {};
     chatIdMap[restauranteId][phoneKey] = fullChatId;
 
@@ -654,7 +657,8 @@ app.post('/notify', async (req, res) => {
     if (chat_id) {
       chatId = chat_id;
     } else {
-      const phoneNorm = normalizePhone(phone);
+      const storeInd = restaurantIndicativos[restaurante_id] || '57';
+      const phoneNorm = normalizePhone(phone, storeInd);
       const mappedChatId = chatIdMap[restaurante_id] && chatIdMap[restaurante_id][phoneNorm];
       chatId = mappedChatId || (phoneNorm + '@c.us');
     }
