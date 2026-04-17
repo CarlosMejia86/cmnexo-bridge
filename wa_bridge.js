@@ -574,13 +574,20 @@ function createSession(restauranteId) {
 
   console.log(`[${restauranteId}] Iniciando cliente WhatsApp...`);
   client.initialize().catch(err => {
-    console.error(`[${restauranteId}] FATAL initialize():`, err.message);
+    console.error(`[${restauranteId}] ❌ FATAL initialize(): ${err.message}`);
+    console.error(`[${restauranteId}] Stack: ${err.stack}`);
     delete sessions[restauranteId];
-    // Limpiar archivos para forzar QR nuevo en el próximo intento
     const qrPath = path.join(DATA_DIR, `qr_${restauranteId}.json`);
     const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
-    if (fs.existsSync(qrPath)) fs.unlinkSync(qrPath);
-    if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
+    if (fs.existsSync(qrPath)) try { fs.unlinkSync(qrPath); } catch(e) {}
+    if (fs.existsSync(sesPath)) try { fs.unlinkSync(sesPath); } catch(e) {}
+    // Reintentar en 30 segundos si no fue desconexión manual
+    if (!isShuttingDown && !manuallyDisconnected.has(restauranteId)) {
+      console.log(`[${restauranteId}] 🔄 Reintentando initialize() en 30s...`);
+      setTimeout(() => {
+        if (!isShuttingDown && !sessions[restauranteId]) createSession(restauranteId);
+      }, 30000);
+    }
   });
 
   sessions[restauranteId] = client;
@@ -606,12 +613,32 @@ app.get('/health/detail', (req, res) => {
     }));
     let volumeFiles = [];
     try { volumeFiles = fs.readdirSync(DATA_DIR); } catch(e) {}
+
+    // Verificar lock files y estado de carpetas de sesión
+    const sessionDiag = {};
+    Object.keys(registry).forEach(id => {
+      const dir = path.join(DATA_DIR, `session-${id}`);
+      const locks = ['SingletonLock','SingletonSocket','SingletonCookieLock'].map(l => path.join(dir, l));
+      sessionDiag[id] = {
+        authDirExists: fs.existsSync(dir),
+        lockFiles: locks.filter(l => fs.existsSync(l)).map(l => path.basename(l)),
+        defaultLock: fs.existsSync(path.join(dir, 'Default', 'LOCK')),
+      };
+    });
+
+    // Verificar binario de Chromium
+    const chromiumPath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
+    const chromiumExists = fs.existsSync(chromiumPath);
+
     res.json({
       uptime: process.uptime(),
       isShuttingDown,
       dataDir: DATA_DIR,
+      chromiumPath,
+      chromiumExists,
       registry,
       activeSessions,
+      sessionDiag,
       volumeFiles,
     });
   } catch(e) {
