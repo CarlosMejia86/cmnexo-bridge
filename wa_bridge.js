@@ -879,11 +879,12 @@ app.get('/session/:id/chats', async (req, res) => {
   }
 });
 
-// GET /session/:id/contacts — lista de contactos del teléfono (excluyendo grupos)
-// Acepta tanto el ID completo (con nonce) como el ID base del restaurante
+// GET /session/:id/contacts — contactos de chats recientes (clientes que escribieron)
+// Para cuentas WhatsApp Business la libreta de contactos no aplica;
+// usamos los chats individuales recientes como fuente de contactos.
+// Acepta tanto el ID completo (con nonce) como el ID base del restaurante.
 app.get('/session/:id/contacts', async (req, res) => {
   const id = req.params.id;
-  // Buscar sesión por ID exacto o por ID base
   let client = sessions[id];
   if (!client || !client.info) {
     const found = findClientByBaseId(id);
@@ -891,26 +892,31 @@ app.get('/session/:id/contacts', async (req, res) => {
   }
   if (!client || !client.info) return res.status(400).json({ error: 'Session not ready' });
   try {
-    const contacts = await client.getContacts();
-    const mapped = contacts
-      .filter(c => {
-        if (!c || !c.id || !c.id._serialized) return false;
-        if (c.isGroup || c.isMe) return false;
-        const ser = c.id._serialized;
-        // Aceptar tanto @c.us (formato clásico) como @lid (formato nuevo de WA)
-        if (!ser.endsWith('@c.us') && !ser.endsWith('@lid')) return false;
-        // Necesita tener número de teléfono real
-        const phone = c.number || c.id.user || '';
-        return phone.length >= 7;
-      })
-      .map(c => ({
-        phone: c.number || c.id.user,
-        name:  c.pushname || c.name || c.number || c.id.user,
-      }))
-      .filter(c => c.phone && /^\d{7,15}$/.test(c.phone))
-      .filter((c, i, arr) => arr.findIndex(x => x.phone === c.phone) === i)
-      .slice(0, 500);
-    res.json({ contacts: mapped, total_raw: contacts.length });
+    // Obtener chats individuales recientes (no grupos, no broadcast)
+    const chats = await client.getChats();
+    const mapped = [];
+    const seen = new Set();
+    for (const chat of chats) {
+      try {
+        if (chat.isGroup || !chat.id || !chat.id._serialized) continue;
+        const ser = chat.id._serialized;
+        if (!ser.endsWith('@c.us') && !ser.endsWith('@lid')) continue;
+        const phone = chat.id.user || '';
+        if (!phone || phone.length < 7 || seen.has(phone)) continue;
+        seen.add(phone);
+        // Intentar obtener nombre del contacto
+        let name = chat.name || phone;
+        try {
+          const contact = await chat.getContact();
+          if (contact && (contact.pushname || contact.name)) {
+            name = contact.pushname || contact.name;
+          }
+        } catch(e2) {}
+        mapped.push({ phone, name });
+        if (mapped.length >= 500) break;
+      } catch(e2) {}
+    }
+    res.json({ contacts: mapped });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
