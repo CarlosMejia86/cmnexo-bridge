@@ -880,9 +880,15 @@ app.get('/session/:id/chats', async (req, res) => {
 });
 
 // GET /session/:id/contacts — lista de contactos del teléfono (excluyendo grupos)
+// Acepta tanto el ID completo (con nonce) como el ID base del restaurante
 app.get('/session/:id/contacts', async (req, res) => {
   const id = req.params.id;
-  const client = sessions[id];
+  // Buscar sesión por ID exacto o por ID base
+  let client = sessions[id];
+  if (!client || !client.info) {
+    const found = findClientByBaseId(id);
+    if (found) client = found.client;
+  }
   if (!client || !client.info) return res.status(400).json({ error: 'Session not ready' });
   try {
     const contacts = await client.getContacts();
