@@ -221,18 +221,26 @@ function createSession(restauranteId) {
   }
 
   // Limpiar archivos de bloqueo de Chromium que quedan cuando el contenedor
-  // anterior fue matado con SIGKILL (sin cleanup). Sin esto, el nuevo Chromium
-  // detecta el lock, asume que otra instancia está corriendo y falla al iniciar.
-  const lockFiles = [
-    path.join(authDirCheck, 'SingletonLock'),
-    path.join(authDirCheck, 'SingletonSocket'),
-    path.join(authDirCheck, 'SingletonCookieLock'),
-    path.join(authDirCheck, '.org.chromium.Chromium'),
-    path.join(authDirCheck, 'Default', 'LOCK'),
-  ];
-  lockFiles.forEach(f => {
-    try { if (fs.existsSync(f)) { fs.unlinkSync(f); console.log(`[${restauranteId}] 🔓 Lock eliminado: ${path.basename(f)}`); } } catch(e) {}
-  });
+  // anterior fue matado con SIGKILL. SingletonLock es un SYMLINK ROTO que apunta
+  // al hostname:pid del contenedor viejo. fs.existsSync() sigue el symlink y
+  // devuelve false cuando el destino no existe — por eso hay que usar lstatSync()
+  // que inspecciona el symlink mismo, no su destino.
+  function removeLock(f) {
+    try {
+      fs.lstatSync(f); // lanza si no existe ni como symlink ni como archivo
+      fs.unlinkSync(f);
+      console.log(`[${restauranteId}] 🔓 Lock eliminado: ${path.basename(f)}`);
+    } catch(e) { /* no existe — ok */ }
+  }
+  removeLock(path.join(authDirCheck, 'SingletonLock'));
+  removeLock(path.join(authDirCheck, 'SingletonSocket'));
+  removeLock(path.join(authDirCheck, 'SingletonCookieLock'));
+  removeLock(path.join(authDirCheck, '.org.chromium.Chromium'));
+  try {
+    removeLock(path.join(authDirCheck, 'Default', 'LOCK'));
+  } catch(e) {}
+  // También eliminar archivos de error anteriores para diagnóstico limpio
+  try { fs.unlinkSync(path.join(DATA_DIR, `init_error_${restauranteId}.txt`)); } catch(e) {}
 
   const client = new Client({
     authStrategy: new LocalAuth({
