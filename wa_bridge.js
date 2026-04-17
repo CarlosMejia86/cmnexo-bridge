@@ -30,6 +30,30 @@ function normalizePhone(raw) {
 }
 
 const sessions = {};
+let isShuttingDown = false; // evita reconexiones durante apagado
+
+// ── Apagado graceful (SIGTERM de Railway al hacer deploy) ────────────────────
+// Railway envía SIGTERM al contenedor viejo cuando el nuevo ya está listo.
+// Destruimos las sesiones WA para que el nuevo contenedor pueda conectar sin CONFLICT.
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`[shutdown] ${signal} recibido — destruyendo sesiones WA...`);
+  const ids = Object.keys(sessions);
+  for (const id of ids) {
+    try {
+      const c = sessions[id];
+      delete sessions[id];
+      await c.destroy();
+      console.log(`[shutdown] ✅ Sesión ${id} destruida`);
+    } catch(e) { console.warn(`[shutdown] Error destruyendo ${id}: ${e.message}`); }
+  }
+  console.log('[shutdown] Sesiones cerradas — saliendo');
+  process.exit(0);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+
 // DATA_DIR: configurable via env var para que coincida con el mount point del volumen en Railway.
 // En Railway: Variables → agregar DATA_DIR=/data (o el path donde está montado el volumen).
 // Si no se configura, usa .wwebjs_auth relativo al script (funciona en local).
@@ -291,6 +315,7 @@ function createSession(restauranteId) {
     lastMsgTs[restauranteId] = Date.now();
     if (watchdogTimers[restauranteId]) clearInterval(watchdogTimers[restauranteId]);
     watchdogTimers[restauranteId] = setInterval(async () => {
+      if (isShuttingDown) return;
       try {
         const state = await client.getState();
         console.log(`[${restauranteId}] [watchdog] estado=${state}`);
@@ -301,7 +326,7 @@ function createSession(restauranteId) {
           delete sessions[restauranteId];
           const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
           if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
-          if (!manuallyDisconnected.has(restauranteId)) {
+          if (!isShuttingDown && !manuallyDisconnected.has(restauranteId)) {
             setTimeout(() => createSession(restauranteId), 3000);
           }
         }
@@ -312,7 +337,7 @@ function createSession(restauranteId) {
         delete sessions[restauranteId];
         const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
         if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
-        if (!manuallyDisconnected.has(restauranteId)) {
+        if (!isShuttingDown && !manuallyDisconnected.has(restauranteId)) {
           setTimeout(() => createSession(restauranteId), 5000);
         }
       }
@@ -332,6 +357,12 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] Desconectado: ${reason}`);
     if (watchdogTimers[restauranteId]) { clearInterval(watchdogTimers[restauranteId]); delete watchdogTimers[restauranteId]; }
     delete sessions[restauranteId];
+
+    // Si estamos en proceso de apagado (SIGTERM), no reconectar
+    if (isShuttingDown) {
+      console.log(`[${restauranteId}] Apagando — no reconectar`);
+      return;
+    }
 
     // Desconexión manual: limpiar registro y auth — NO reconectar
     if (manuallyDisconnected.has(restauranteId)) {
@@ -895,47 +926,57 @@ app.listen(PORT, '0.0.0.0', () => {
   }
 
   // ── Auto-restaurar sesiones desde el registro persistente ────
-  // sessions_registry.json solo se modifica intencionalmente:
-  // se agrega al conectar y se elimina al desconectar manualmente.
-  // Sobrevive SIGKILL, crashes y cualquier tipo de reinicio.
-  try {
-    const ids = registryIds().filter(id => !manuallyDisconnected.has(id));
-    if (ids.length === 0) {
-      console.log('[startup] Sin sesiones registradas que restaurar.');
-      // Verificar si hay carpetas de sesión LocalAuth huérfanas (conectadas antes del registro)
-      try {
-        const allFiles = fs.readdirSync(DATA_DIR);
-        const authFolders = allFiles.filter(f => f.startsWith('session-') && fs.statSync(path.join(DATA_DIR, f)).isDirectory());
-        if (authFolders.length > 0) {
-          console.log(`[startup] ⚠️ Se encontraron ${authFolders.length} carpeta(s) LocalAuth sin registro: ${authFolders.join(', ')}`);
-          console.log('[startup] Restaurando sesiones desde carpetas LocalAuth existentes...');
-          authFolders.forEach((folder, i) => {
-            const sid = folder.replace('session-', '');
-            setTimeout(() => {
-              console.log(`[startup] Iniciando sesión huérfana: ${sid}`);
-              registryAdd(sid); // agregar al registro para futuros reinicios
-              createSession(sid);
-            }, i * 5000);
+  // Esperamos STARTUP_DELAY ms antes de restaurar para que Railway tenga tiempo de
+  // enviar SIGTERM al contenedor viejo y matarlo limpiamente antes de que el nuevo
+  // intente conectar las mismas sesiones WA (evita el evento CONFLICT).
+  const STARTUP_DELAY = parseInt(process.env.STARTUP_DELAY || '25000'); // 25s por defecto
+  console.log(`[startup] Esperando ${STARTUP_DELAY / 1000}s antes de restaurar sesiones (evita CONFLICT con contenedor viejo)...`);
+
+  setTimeout(() => {
+    if (isShuttingDown) { console.log('[startup] Apagado en curso — no restaurar sesiones'); return; }
+    try {
+      const ids = registryIds().filter(id => !manuallyDisconnected.has(id));
+      if (ids.length === 0) {
+        console.log('[startup] Sin sesiones registradas que restaurar.');
+        // Verificar si hay carpetas de sesión LocalAuth huérfanas (conectadas antes del registro)
+        try {
+          const allFiles = fs.readdirSync(DATA_DIR);
+          const authFolders = allFiles.filter(f => {
+            try { return f.startsWith('session-') && fs.statSync(path.join(DATA_DIR, f)).isDirectory(); } catch(e) { return false; }
           });
-        }
-      } catch(e2) { console.warn('[startup] Error buscando carpetas LocalAuth:', e2.message); }
-    } else {
-      console.log(`[startup] Restaurando ${ids.length} sesión(es) desde registro...`);
-      ids.forEach((id, i) => {
-        setTimeout(() => {
-          if (sessions[id]) return;
-          console.log(`[startup] Iniciando sesión: ${id}`);
-          createSession(id);
-        }, i * 5000); // 5s entre sesiones
-      });
+          if (authFolders.length > 0) {
+            console.log(`[startup] ⚠️ Se encontraron ${authFolders.length} carpeta(s) LocalAuth sin registro: ${authFolders.join(', ')}`);
+            console.log('[startup] Restaurando sesiones desde carpetas LocalAuth existentes...');
+            authFolders.forEach((folder, i) => {
+              const sid = folder.replace('session-', '');
+              setTimeout(() => {
+                if (isShuttingDown || sessions[sid]) return;
+                console.log(`[startup] Iniciando sesión huérfana: ${sid}`);
+                registryAdd(sid);
+                createSession(sid);
+              }, i * 5000);
+            });
+          }
+        } catch(e2) { console.warn('[startup] Error buscando carpetas LocalAuth:', e2.message); }
+      } else {
+        console.log(`[startup] Restaurando ${ids.length} sesión(es) desde registro...`);
+        ids.forEach((id, i) => {
+          setTimeout(() => {
+            if (isShuttingDown || sessions[id]) return;
+            console.log(`[startup] Iniciando sesión: ${id}`);
+            createSession(id);
+          }, i * 5000);
+        });
+      }
+    } catch(e) {
+      console.warn('[startup] Error al restaurar sesiones:', e.message);
     }
-  } catch(e) {
-    console.warn('[startup] Error al restaurar sesiones:', e.message);
-  }
+  }, STARTUP_DELAY);
 });
 
 // ── Heartbeat: cada 90s verifica sesiones del registro ────────
 setInterval(() => {
+  if (isShuttingDown) return;
   try {
     const ids = registryIds().filter(id => !manuallyDisconnected.has(id));
     ids.forEach(id => {
