@@ -893,14 +893,24 @@ app.get('/session/:id/contacts', async (req, res) => {
   try {
     const contacts = await client.getContacts();
     const mapped = contacts
-      .filter(c => c && c.id && c.id._serialized && !c.isGroup && !c.isMe && c.id._serialized.endsWith('@c.us') && c.id.user && c.id.user.length >= 7)
+      .filter(c => {
+        if (!c || !c.id || !c.id._serialized) return false;
+        if (c.isGroup || c.isMe) return false;
+        const ser = c.id._serialized;
+        // Aceptar tanto @c.us (formato clásico) como @lid (formato nuevo de WA)
+        if (!ser.endsWith('@c.us') && !ser.endsWith('@lid')) return false;
+        // Necesita tener número de teléfono real
+        const phone = c.number || c.id.user || '';
+        return phone.length >= 7;
+      })
       .map(c => ({
-        phone: c.id.user,
-        name:  c.pushname || c.name || c.id.user,
+        phone: c.number || c.id.user,
+        name:  c.pushname || c.name || c.number || c.id.user,
       }))
+      .filter(c => c.phone && /^\d{7,15}$/.test(c.phone))
       .filter((c, i, arr) => arr.findIndex(x => x.phone === c.phone) === i)
       .slice(0, 500);
-    res.json({ contacts: mapped });
+    res.json({ contacts: mapped, total_raw: contacts.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
