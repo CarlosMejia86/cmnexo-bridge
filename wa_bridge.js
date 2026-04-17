@@ -32,27 +32,25 @@ function normalizePhone(raw) {
 const sessions = {};
 let isShuttingDown = false; // evita reconexiones durante apagado
 
-// ── Apagado graceful (SIGTERM de Railway al hacer deploy) ────────────────────
-// Railway envía SIGTERM al contenedor viejo cuando el nuevo ya está listo.
-// Destruimos las sesiones WA para que el nuevo contenedor pueda conectar sin CONFLICT.
-async function gracefulShutdown(signal) {
+// ── Manejo de señales de apagado ─────────────────────────────────────────────
+// SIGTERM: Railway lo envía al contenedor VIEJO cuando el nuevo ya está listo.
+// NO destruimos las sesiones WA — eso corrompería los archivos LocalAuth que
+// el nuevo contenedor necesita para reconectar sin QR.
+// Solo marcamos isShuttingDown para que ningún timer intente reconectar.
+// Railway hará SIGKILL después del grace period; Chromium muere limpio y los
+// archivos de sesión quedan íntegros.
+process.on('SIGTERM', () => {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  console.log(`[shutdown] ${signal} recibido — destruyendo sesiones WA...`);
-  const ids = Object.keys(sessions);
-  for (const id of ids) {
-    try {
-      const c = sessions[id];
-      delete sessions[id];
-      await c.destroy();
-      console.log(`[shutdown] ✅ Sesión ${id} destruida`);
-    } catch(e) { console.warn(`[shutdown] Error destruyendo ${id}: ${e.message}`); }
-  }
-  console.log('[shutdown] Sesiones cerradas — saliendo');
+  console.log('[shutdown] SIGTERM recibido — deteniendo reconexiones (Railway hará SIGKILL)');
+  // No llamar process.exit() — dejamos que Railway lo haga con SIGKILL
+  // para no interrumpir escrituras de LocalAuth de Chromium
+});
+process.on('SIGINT', () => {
+  isShuttingDown = true;
+  console.log('[shutdown] SIGINT recibido — saliendo');
   process.exit(0);
-}
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+});
 
 // DATA_DIR: configurable via env var para que coincida con el mount point del volumen en Railway.
 // En Railway: Variables → agregar DATA_DIR=/data (o el path donde está montado el volumen).
@@ -929,8 +927,8 @@ app.listen(PORT, '0.0.0.0', () => {
   // Esperamos STARTUP_DELAY ms antes de restaurar para que Railway tenga tiempo de
   // enviar SIGTERM al contenedor viejo y matarlo limpiamente antes de que el nuevo
   // intente conectar las mismas sesiones WA (evita el evento CONFLICT).
-  const STARTUP_DELAY = parseInt(process.env.STARTUP_DELAY || '25000'); // 25s por defecto
-  console.log(`[startup] Esperando ${STARTUP_DELAY / 1000}s antes de restaurar sesiones (evita CONFLICT con contenedor viejo)...`);
+  const STARTUP_DELAY = parseInt(process.env.STARTUP_DELAY || '15000'); // 15s por defecto
+  console.log(`[startup] Esperando ${STARTUP_DELAY / 1000}s antes de restaurar sesiones (deja tiempo al SIGKILL del contenedor viejo)...`);
 
   setTimeout(() => {
     if (isShuttingDown) { console.log('[startup] Apagado en curso — no restaurar sesiones'); return; }
