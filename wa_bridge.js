@@ -900,20 +900,28 @@ app.get('/session/:id/contacts', async (req, res) => {
       try {
         if (chat.isGroup || !chat.id || !chat.id._serialized) continue;
         const ser = chat.id._serialized;
-        // Solo aceptar @c.us — son números reales. @lid son IDs internos de WA, no válidos para envío.
-        if (!ser.endsWith('@c.us')) continue;
-        const phone = chat.id.user || '';
-        // Validar que sea un número de teléfono real (7-15 dígitos)
-        if (!phone || !/^\d{7,15}$/.test(phone) || seen.has(phone)) continue;
-        seen.add(phone);
-        // Intentar obtener nombre del contacto
-        let name = chat.name || phone;
+        if (!ser.endsWith('@c.us') && !ser.endsWith('@lid')) continue;
+
+        // Para @c.us: chat.id.user es el teléfono directamente
+        // Para @lid: chat.id.user es un ID interno — necesitamos contact.number
+        let phone = '';
+        let name = chat.name || '';
         try {
           const contact = await chat.getContact();
-          if (contact && (contact.pushname || contact.name)) {
-            name = contact.pushname || contact.name;
+          if (contact) {
+            // contact.number es el teléfono real (sin +), disponible en ambos formatos
+            phone = (contact.number || contact.id?.user || '').replace(/\D/g, '');
+            if (contact.pushname || contact.name) name = contact.pushname || contact.name;
           }
         } catch(e2) {}
+
+        // Fallback para @c.us si getContact() falló
+        if (!phone && ser.endsWith('@c.us')) phone = chat.id.user || '';
+
+        // Validar que sea un número de teléfono real (E.164: 7-15 dígitos)
+        if (!phone || !/^\d{7,15}$/.test(phone) || seen.has(phone)) continue;
+        if (!name) name = phone;
+        seen.add(phone);
         mapped.push({ phone, name });
         if (mapped.length >= 500) break;
       } catch(e2) {}
