@@ -840,6 +840,37 @@ app.post('/status', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 Servidor Express vivo en puerto ${PORT}`);
   console.log(`📡 Esperando peticiones API...\n`);
+
+  // ── Auto-restaurar sesiones activas al arrancar ──────────────
+  // LocalAuth guarda credenciales en disco, así que podemos reconectar
+  // sin pedir QR nuevo. Se hace en dos oleadas para no sobrecargar.
+  try {
+    const sesFiles = fs.readdirSync(DATA_DIR)
+      .filter(f => f.startsWith('session_') && f.endsWith('.json'));
+
+    if (sesFiles.length === 0) {
+      console.log('[startup] Sin sesiones previas que restaurar.');
+    } else {
+      console.log(`[startup] Restaurando ${sesFiles.length} sesión(es) activa(s)...`);
+      sesFiles.forEach((file, i) => {
+        const restauranteId = file.replace('session_', '').replace('.json', '');
+        // Respetar desconexiones manuales
+        if (manuallyDisconnected.has(restauranteId)) return;
+        const baseId = restauranteId.includes('_')
+          ? restauranteId.substring(0, restauranteId.lastIndexOf('_'))
+          : null;
+        if (baseId && manuallyDisconnected.has(baseId)) return;
+
+        // Escalonar inicios: 8 segundos entre cada sesión para no saturar Chromium
+        setTimeout(() => {
+          console.log(`[startup] Iniciando sesión: ${restauranteId}`);
+          createSession(restauranteId);
+        }, i * 8000);
+      });
+    }
+  } catch(e) {
+    console.warn('[startup] Error al restaurar sesiones:', e.message);
+  }
 });
 
 // ── Heartbeat: cada 5 min restaura sesiones caídas (no las desconectadas manualmente) ───
@@ -859,7 +890,7 @@ setInterval(() => {
       createSession(restauranteId);
     }
   });
-}, 5 * 60 * 1000);
+}, 2 * 60 * 1000); // cada 2 minutos
 
 // ── Self-ping keepalive: evita que Railway duerma el contenedor (cold start) ───────────
 // Hace una petición HTTP al propio servidor cada 10 minutos para mantenerlo activo.
