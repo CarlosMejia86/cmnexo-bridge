@@ -722,6 +722,27 @@ app.get('/session/:id/chats', async (req, res) => {
   }
 });
 
+// GET /session/:id/contacts — lista de contactos del teléfono (excluyendo grupos)
+app.get('/session/:id/contacts', async (req, res) => {
+  const id = req.params.id;
+  const client = sessions[id];
+  if (!client || !client.info) return res.status(400).json({ error: 'Session not ready' });
+  try {
+    const contacts = await client.getContacts();
+    const mapped = contacts
+      .filter(c => !c.isGroup && !c.isMe && c.id._serialized.endsWith('@c.us') && c.id.user.length >= 7)
+      .map(c => ({
+        phone: c.id.user,
+        name:  c.pushname || c.name || c.id.user,
+      }))
+      .filter((c, i, arr) => arr.findIndex(x => x.phone === c.phone) === i) // deduplicar
+      .slice(0, 500);
+    res.json({ contacts: mapped });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/session/:id/chat/:chatId/messages', async (req, res) => {
   const { id, chatId } = req.params;
   const client = sessions[id];
