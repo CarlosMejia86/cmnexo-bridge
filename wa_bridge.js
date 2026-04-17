@@ -574,8 +574,11 @@ function createSession(restauranteId) {
 
   console.log(`[${restauranteId}] Iniciando cliente WhatsApp...`);
   client.initialize().catch(err => {
+    const errMsg = `${new Date().toISOString()} | ${err.message}`;
     console.error(`[${restauranteId}] ❌ FATAL initialize(): ${err.message}`);
     console.error(`[${restauranteId}] Stack: ${err.stack}`);
+    // Guardar error en disco para verlo desde /health/detail
+    try { fs.writeFileSync(path.join(DATA_DIR, `init_error_${restauranteId}.txt`), errMsg + '\n' + (err.stack || '')); } catch(e) {}
     delete sessions[restauranteId];
     const qrPath = path.join(DATA_DIR, `qr_${restauranteId}.json`);
     const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
@@ -630,6 +633,13 @@ app.get('/health/detail', (req, res) => {
     const chromiumPath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
     const chromiumExists = fs.existsSync(chromiumPath);
 
+    // Leer errores de initialize() guardados en disco
+    const initErrors = {};
+    volumeFiles.filter(f => f.startsWith('init_error_')).forEach(f => {
+      const id = f.replace('init_error_', '').replace('.txt', '');
+      try { initErrors[id] = fs.readFileSync(path.join(DATA_DIR, f), 'utf8').substring(0, 500); } catch(e) {}
+    });
+
     res.json({
       uptime: process.uptime(),
       isShuttingDown,
@@ -639,6 +649,7 @@ app.get('/health/detail', (req, res) => {
       registry,
       activeSessions,
       sessionDiag,
+      initErrors,
       volumeFiles,
     });
   } catch(e) {
