@@ -210,14 +210,29 @@ function createSession(restauranteId) {
 
   console.log(`[${restauranteId}] Creando nueva sesión WhatsApp... (baseId=${baseId})`);
 
-  // Si la carpeta de auth tiene marcador de invalidación, borrarla ahora
   const authDirCheck = path.join(DATA_DIR, `session-${restauranteId}`);
+
+  // Si la carpeta de auth tiene marcador de invalidación, borrarla ahora
   if (fs.existsSync(path.join(authDirCheck, '.invalidated'))) {
     console.log(`[${restauranteId}] Carpeta auth inválida detectada — eliminando`);
     try { fs.rmSync(authDirCheck, { recursive: true, force: true }); } catch(e) {
       console.warn(`[${restauranteId}] No se pudo eliminar authDir inválido:`, e.message);
     }
   }
+
+  // Limpiar archivos de bloqueo de Chromium que quedan cuando el contenedor
+  // anterior fue matado con SIGKILL (sin cleanup). Sin esto, el nuevo Chromium
+  // detecta el lock, asume que otra instancia está corriendo y falla al iniciar.
+  const lockFiles = [
+    path.join(authDirCheck, 'SingletonLock'),
+    path.join(authDirCheck, 'SingletonSocket'),
+    path.join(authDirCheck, 'SingletonCookieLock'),
+    path.join(authDirCheck, '.org.chromium.Chromium'),
+    path.join(authDirCheck, 'Default', 'LOCK'),
+  ];
+  lockFiles.forEach(f => {
+    try { if (fs.existsSync(f)) { fs.unlinkSync(f); console.log(`[${restauranteId}] 🔓 Lock eliminado: ${path.basename(f)}`); } } catch(e) {}
+  });
 
   const client = new Client({
     authStrategy: new LocalAuth({
@@ -241,6 +256,8 @@ function createSession(restauranteId) {
         '--hide-scrollbars',
         '--mute-audio',
         '--safebrowsing-disable-auto-update',
+        '--no-first-run',
+        '--disable-features=ChromeWhatsNewUI,HttpsUpgrades',
       ]
     }
   });
@@ -579,6 +596,28 @@ app.get('/', (req, res) => res.json({
 }));
 
 app.get('/health', (req, res) => res.status(200).json({ status: 'OK', uptime: process.uptime() }));
+
+// Diagnóstico detallado: muestra registro, sesiones activas y archivos del volumen
+app.get('/health/detail', (req, res) => {
+  try {
+    const registry = registryLoad();
+    const activeSessions = Object.keys(sessions).map(id => ({
+      id, connected: !!(sessions[id]?.info?.wid)
+    }));
+    let volumeFiles = [];
+    try { volumeFiles = fs.readdirSync(DATA_DIR); } catch(e) {}
+    res.json({
+      uptime: process.uptime(),
+      isShuttingDown,
+      dataDir: DATA_DIR,
+      registry,
+      activeSessions,
+      volumeFiles,
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.post('/session/start', async (req, res) => {
   const { restaurante_id, force_fresh } = req.body;
