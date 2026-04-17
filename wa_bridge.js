@@ -656,12 +656,21 @@ function clearManuallyDisconnected(id) {
   try { const f = path.join(DATA_DIR, `disconnected_${id}`); if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {}
 }
 
-// Al iniciar: restaurar flags de desconexión manual desde disco
+// Al iniciar: restaurar flags de desconexión manual desde disco.
+// Limpiamos archivos disconnected_ de IDs que ya están en el registro activo
+// (sesiones que fallaron en el pasado pero luego se reconectaron correctamente).
 try {
+  const activeRegistry = registryLoad();
   fs.readdirSync(DATA_DIR).filter(f => f.startsWith('disconnected_')).forEach(f => {
     const id = f.replace('disconnected_', '');
-    manuallyDisconnected.add(id);
-    console.log(`[startup] Restaurando desconexión manual: ${id}`);
+    // Si este ID está en el registro, es una sesión activa — borrar el flag huérfano
+    if (activeRegistry[id]) {
+      try { fs.unlinkSync(path.join(DATA_DIR, f)); } catch(e) {}
+      console.log(`[startup] 🧹 Flag disconnected huérfano eliminado: ${id}`);
+    } else {
+      manuallyDisconnected.add(id);
+      console.log(`[startup] Desconexión manual restaurada: ${id}`);
+    }
   });
 } catch(e) {}
 
