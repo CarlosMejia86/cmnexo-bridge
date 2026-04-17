@@ -33,6 +33,21 @@ const sessions = {};
 const DATA_DIR = path.join(__dirname, '.wwebjs_auth');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// Flag: true cuando el proceso está cerrándose por PM2 reload/restart
+// Evita que el evento 'disconnected' borre los archivos de sesión durante el cierre
+let isShuttingDown = false;
+
+// Graceful shutdown: PM2 envía SIGINT en reload, SIGTERM en restart
+// Marcamos el flag para que 'disconnected' no limpie archivos
+['SIGINT', 'SIGTERM'].forEach(sig => {
+  process.on(sig, () => {
+    console.log(`\n[bridge] ${sig} recibido — marcando shutdown graceful...`);
+    isShuttingDown = true;
+    // Dar 3s para que los handlers en vuelo terminen, luego salir
+    setTimeout(() => process.exit(0), 3000);
+  });
+});
+
 // Mapa chatId real por teléfono normalizado: { restauranteId: { phone10: fullChatId } }
 // Permite enviar notificaciones al chatId correcto aunque sea @lid u otro formato
 const chatIdMap = {};
@@ -305,6 +320,15 @@ function createSession(restauranteId) {
   client.on('disconnected', (reason) => {
     console.log(`[${restauranteId}] Desconectado: ${reason}`);
     if (watchdogTimers[restauranteId]) { clearInterval(watchdogTimers[restauranteId]); delete watchdogTimers[restauranteId]; }
+
+    // Si el proceso se está cerrando por PM2 reload/restart, NO borrar el .json
+    // para que el próximo arranque pueda restaurar la sesión automáticamente
+    if (isShuttingDown) {
+      console.log(`[${restauranteId}] Cierre graceful — preservando session_*.json para restaurar al reiniciar`);
+      delete sessions[restauranteId];
+      return;
+    }
+
     const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
     if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
     delete sessions[restauranteId];
@@ -841,29 +865,25 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 Servidor Express vivo en puerto ${PORT}`);
   console.log(`📡 Esperando peticiones API...\n`);
 
-  // ── Auto-restaurar sesiones activas al arrancar ──────────────
-  // LocalAuth guarda credenciales en disco, así que podemos reconectar
-  // sin pedir QR nuevo. Se hace en dos oleadas para no sobrecargar.
+  // ── Auto-restaurar sesiones al arrancar ──────────────────────
+  // Detecta sesiones por carpeta de auth (session-{id}/) que LocalAuth
+  // guarda en disco y que sobrevive el reinicio del proceso.
+  // Más confiable que session_*.json que puede borrarse en cierres abruptos.
   try {
-    const sesFiles = fs.readdirSync(DATA_DIR)
-      .filter(f => f.startsWith('session_') && f.endsWith('.json'));
+    const authFolders = fs.readdirSync(DATA_DIR)
+      .filter(f => f.startsWith('session-') && fs.statSync(path.join(DATA_DIR, f)).isDirectory())
+      .filter(f => !fs.existsSync(path.join(DATA_DIR, f, '.invalidated'))); // ignorar marcadas inválidas
 
-    if (sesFiles.length === 0) {
+    if (authFolders.length === 0) {
       console.log('[startup] Sin sesiones previas que restaurar.');
     } else {
-      console.log(`[startup] Restaurando ${sesFiles.length} sesión(es) activa(s)...`);
-      sesFiles.forEach((file, i) => {
-        const restauranteId = file.replace('session_', '').replace('.json', '');
-        // Respetar desconexiones manuales
-        if (manuallyDisconnected.has(restauranteId)) return;
-        const baseId = restauranteId.includes('_')
-          ? restauranteId.substring(0, restauranteId.lastIndexOf('_'))
-          : null;
-        if (baseId && manuallyDisconnected.has(baseId)) return;
-
-        // Escalonar inicios: 8 segundos entre cada sesión para no saturar Chromium
+      console.log(`[startup] Encontradas ${authFolders.length} sesión(es) con credenciales — restaurando...`);
+      authFolders.forEach((folder, i) => {
+        const restauranteId = folder.replace('session-', '');
+        // Escalonar: 8s entre sesiones para no saturar Chromium
         setTimeout(() => {
-          console.log(`[startup] Iniciando sesión: ${restauranteId}`);
+          if (sessions[restauranteId]) return; // ya fue iniciada
+          console.log(`[startup] Restaurando: ${restauranteId}`);
           createSession(restauranteId);
         }, i * 8000);
       });
@@ -873,23 +893,26 @@ app.listen(PORT, '0.0.0.0', () => {
   }
 });
 
-// ── Heartbeat: cada 5 min restaura sesiones caídas (no las desconectadas manualmente) ───
+// ── Heartbeat: cada 2 min restaura sesiones caídas ───────────
 setInterval(() => {
-  const sesFiles = fs.readdirSync(DATA_DIR).filter(f => f.startsWith('session_') && f.endsWith('.json'));
-  sesFiles.forEach(file => {
-    const restauranteId = file.replace('session_', '').replace('.json', '');
-    if (manuallyDisconnected.has(restauranteId)) return; // desconectado por el usuario — no reconectar
-    // Si el ID base (sin nonce) está marcado como desconectado manual, tampoco reconectar variantes con nonce
-    const baseId = restauranteId.includes('_') ? restauranteId.substring(0, restauranteId.lastIndexOf('_')) : null;
-    if (baseId && manuallyDisconnected.has(baseId)) {
-      console.log(`[heartbeat] Saltando ${restauranteId} — ID base ${baseId} desconectado manualmente`);
-      return;
-    }
-    if (!sessions[restauranteId]) {
-      console.log(`[heartbeat] Reconectando sesión caída: ${restauranteId}`);
-      createSession(restauranteId);
-    }
-  });
+  try {
+    const authFolders = fs.readdirSync(DATA_DIR)
+      .filter(f => f.startsWith('session-') && fs.statSync(path.join(DATA_DIR, f)).isDirectory())
+      .filter(f => !fs.existsSync(path.join(DATA_DIR, f, '.invalidated')));
+
+    authFolders.forEach(folder => {
+      const restauranteId = folder.replace('session-', '');
+      if (manuallyDisconnected.has(restauranteId)) return;
+      const baseId = restauranteId.includes('_') ? restauranteId.substring(0, restauranteId.lastIndexOf('_')) : null;
+      if (baseId && manuallyDisconnected.has(baseId)) return;
+      if (!sessions[restauranteId]) {
+        console.log(`[heartbeat] Reconectando sesión caída: ${restauranteId}`);
+        createSession(restauranteId);
+      }
+    });
+  } catch(e) {
+    console.warn('[heartbeat] Error:', e.message);
+  }
 }, 2 * 60 * 1000); // cada 2 minutos
 
 // ── Self-ping keepalive: evita que Railway duerma el contenedor (cold start) ───────────
