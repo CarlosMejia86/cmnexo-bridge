@@ -13,7 +13,7 @@ const PORT      = process.env.PORT      || 3000;
 const API_URL   = process.env.API_URL   || 'https://cmnexo.com/api';
 const STORE_URL = process.env.STORE_URL || 'https://cmnexo.com';
 
-console.log('=== CMNexo WA Bridge v1.3.0 iniciando (image support) ===');
+console.log('=== CMNexo WA Bridge v1.4.0 iniciando (persistent sessions) ===');
 
 /**
  * Normaliza un número de teléfono a formato internacional sin + ni espacios.
@@ -30,8 +30,14 @@ function normalizePhone(raw) {
 }
 
 const sessions = {};
-const DATA_DIR = path.join(__dirname, '.wwebjs_auth');
+// DATA_DIR: configurable via env var para que coincida con el mount point del volumen en Railway.
+// En Railway: Variables → agregar DATA_DIR=/data (o el path donde está montado el volumen).
+// Si no se configura, usa .wwebjs_auth relativo al script (funciona en local).
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(__dirname, '.wwebjs_auth');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+console.log(`[config] DATA_DIR = ${DATA_DIR}`);
 
 // ── Registro persistente de sesiones ────────────────────────────
 // Este archivo SOLO se modifica intencionalmente (connect / manual disconnect).
@@ -867,7 +873,26 @@ app.post('/status', async (req, res) => {
 // ========================================
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 Servidor Express vivo en puerto ${PORT}`);
-  console.log(`📡 Esperando peticiones API...\n`);
+  console.log(`📡 DATA_DIR resuelto: ${DATA_DIR}`);
+  console.log(`📡 REGISTRY_FILE: ${REGISTRY_FILE}`);
+
+  // ── Diagnóstico de volumen Railway ──────────────────────────
+  try {
+    const exists = fs.existsSync(DATA_DIR);
+    console.log(`[startup] DATA_DIR existe: ${exists}`);
+    if (exists) {
+      const files = fs.readdirSync(DATA_DIR);
+      console.log(`[startup] Archivos en DATA_DIR (${files.length}): ${files.join(', ') || '(vacío)'}`);
+    }
+    const regExists = fs.existsSync(REGISTRY_FILE);
+    console.log(`[startup] sessions_registry.json existe: ${regExists}`);
+    if (regExists) {
+      const raw = fs.readFileSync(REGISTRY_FILE, 'utf8');
+      console.log(`[startup] Contenido del registro: ${raw}`);
+    }
+  } catch(diagErr) {
+    console.warn('[startup] Error en diagnóstico:', diagErr.message);
+  }
 
   // ── Auto-restaurar sesiones desde el registro persistente ────
   // sessions_registry.json solo se modifica intencionalmente:
@@ -877,6 +902,23 @@ app.listen(PORT, '0.0.0.0', () => {
     const ids = registryIds().filter(id => !manuallyDisconnected.has(id));
     if (ids.length === 0) {
       console.log('[startup] Sin sesiones registradas que restaurar.');
+      // Verificar si hay carpetas de sesión LocalAuth huérfanas (conectadas antes del registro)
+      try {
+        const allFiles = fs.readdirSync(DATA_DIR);
+        const authFolders = allFiles.filter(f => f.startsWith('session-') && fs.statSync(path.join(DATA_DIR, f)).isDirectory());
+        if (authFolders.length > 0) {
+          console.log(`[startup] ⚠️ Se encontraron ${authFolders.length} carpeta(s) LocalAuth sin registro: ${authFolders.join(', ')}`);
+          console.log('[startup] Restaurando sesiones desde carpetas LocalAuth existentes...');
+          authFolders.forEach((folder, i) => {
+            const sid = folder.replace('session-', '');
+            setTimeout(() => {
+              console.log(`[startup] Iniciando sesión huérfana: ${sid}`);
+              registryAdd(sid); // agregar al registro para futuros reinicios
+              createSession(sid);
+            }, i * 5000);
+          });
+        }
+      } catch(e2) { console.warn('[startup] Error buscando carpetas LocalAuth:', e2.message); }
     } else {
       console.log(`[startup] Restaurando ${ids.length} sesión(es) desde registro...`);
       ids.forEach((id, i) => {
