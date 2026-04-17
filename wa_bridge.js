@@ -900,9 +900,11 @@ app.get('/session/:id/contacts', async (req, res) => {
       try {
         if (chat.isGroup || !chat.id || !chat.id._serialized) continue;
         const ser = chat.id._serialized;
-        if (!ser.endsWith('@c.us') && !ser.endsWith('@lid')) continue;
+        // Solo aceptar @c.us — son números reales. @lid son IDs internos de WA, no válidos para envío.
+        if (!ser.endsWith('@c.us')) continue;
         const phone = chat.id.user || '';
-        if (!phone || phone.length < 7 || seen.has(phone)) continue;
+        // Validar que sea un número de teléfono real (7-15 dígitos)
+        if (!phone || !/^\d{7,15}$/.test(phone) || seen.has(phone)) continue;
         seen.add(phone);
         // Intentar obtener nombre del contacto
         let name = chat.name || phone;
