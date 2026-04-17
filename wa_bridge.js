@@ -902,27 +902,26 @@ app.get('/session/:id/contacts', async (req, res) => {
         const ser = chat.id._serialized;
         if (!ser.endsWith('@c.us') && !ser.endsWith('@lid')) continue;
 
-        // Para @c.us: chat.id.user es el teléfono directamente
-        // Para @lid: chat.id.user es un ID interno — necesitamos contact.number
-        let phone = '';
+        // chatId real para envío directo (funciona con @c.us y @lid)
+        const chatId = ser;
+        let phone = chat.id.user || '';
         let name = chat.name || '';
+
         try {
           const contact = await chat.getContact();
           if (contact) {
-            // contact.number es el teléfono real (sin +), disponible en ambos formatos
-            phone = (contact.number || contact.id?.user || '').replace(/\D/g, '');
+            // contact.number tiene el teléfono real para @c.us; para @lid puede ser el mismo LID
+            const num = (contact.number || '').replace(/\D/g, '');
+            if (num && /^\d{7,15}$/.test(num)) phone = num; // número real válido
             if (contact.pushname || contact.name) name = contact.pushname || contact.name;
           }
         } catch(e2) {}
 
-        // Fallback para @c.us si getContact() falló
-        if (!phone && ser.endsWith('@c.us')) phone = chat.id.user || '';
-
-        // Validar que sea un número de teléfono real (E.164: 7-15 dígitos)
-        if (!phone || !/^\d{7,15}$/.test(phone) || seen.has(phone)) continue;
-        if (!name) name = phone;
-        seen.add(phone);
-        mapped.push({ phone, name });
+        if (!name) name = phone || chatId;
+        // Evitar duplicados por chatId
+        if (seen.has(chatId)) continue;
+        seen.add(chatId);
+        mapped.push({ phone, name, chatId });
         if (mapped.length >= 500) break;
       } catch(e2) {}
     }
