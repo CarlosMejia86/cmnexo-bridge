@@ -488,32 +488,33 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] Respondiendo a chatId=${chatId} | Link: ${storeLink}`);
 
     // --- PEDIDO ACTIVO: no responder si el cliente ya tiene un pedido en proceso ---
-    // Usar realPhone (número real resuelto) para mayor precisión en la búsqueda
-    // Intentar con realPhone primero; si falla, reintentar con `from`
     let tieneActivo = false;
-    for (const telParam of [realPhone, from]) {
+    // Usar siempre fullChatId como cid; probar con realPhone y luego con `from` como teléfono
+    const telCandidates = [...new Set([realPhone, from].filter(Boolean))];
+    for (const telParam of telCandidates) {
       try {
-        const activeRes = await fetch(
-          `${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${encodeURIComponent(telParam)}&cid=${encodeURIComponent(fullChatId)}`,
-          { signal: AbortSignal.timeout(6000) }
-        );
+        const url = `${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${encodeURIComponent(telParam)}&cid=${encodeURIComponent(fullChatId)}`;
+        console.log(`[${restauranteId}] Verificando pedido activo: tel=${telParam} cid=${fullChatId}`);
+        const activeRes = await fetch(url, { signal: AbortSignal.timeout(6000) });
         if (activeRes.ok) {
           const activeData = await activeRes.json();
+          console.log(`[${restauranteId}] Pedido activo resultado: ${JSON.stringify(activeData)}`);
           if (activeData.activo) { tieneActivo = true; break; }
           break; // respuesta válida (false) → no reintentar con el otro número
+        } else {
+          console.warn(`[${restauranteId}] activo.php respondió HTTP ${activeRes.status}`);
         }
       } catch(e) {
-        console.warn(`[${restauranteId}] Error verificando pedido activo con tel=${telParam}:`, e.message);
-        // Si el primer intento (realPhone) falla por red, probar con `from`
-        if (telParam === from) {
-          // Ambos fallaron: para evitar enviar durante un pedido activo, bloquear
-          console.warn(`[${restauranteId}] No se pudo verificar pedido activo — silenciando respuesta automática`);
+        console.warn(`[${restauranteId}] Error verificando pedido activo con tel=${telParam}: ${e.message}`);
+        if (telParam === telCandidates[telCandidates.length - 1]) {
+          // Todos los intentos fallaron: silenciar para no interrumpir pedido existente
+          console.warn(`[${restauranteId}] Sin verificación disponible — silenciando respuesta automática`);
           return;
         }
       }
     }
     if (tieneActivo) {
-      console.log(`[${restauranteId}] Cliente ${realPhone} tiene pedido activo — sin respuesta automática`);
+      console.log(`[${restauranteId}] ✋ Cliente ${realPhone} tiene pedido activo — sin respuesta automática`);
       return;
     }
 
