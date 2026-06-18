@@ -13,7 +13,7 @@ const PORT      = process.env.PORT      || 3000;
 const API_URL   = process.env.API_URL   || 'https://cmnexo.com/api';
 const STORE_URL = process.env.STORE_URL || 'https://cmnexo.com';
 
-console.log('=== CMNexo WA Bridge v1.4.0 iniciando (persistent sessions) ===');
+console.log('=== CMNexo WA Bridge v1.3.0 iniciando (image support) ===');
 
 /**
  * Normaliza un número de teléfono a formato internacional sin + ni espacios.
@@ -30,55 +30,8 @@ function normalizePhone(raw) {
 }
 
 const sessions = {};
-let isShuttingDown = false; // evita reconexiones durante apagado
-
-// ── Manejo de señales de apagado ─────────────────────────────────────────────
-// SIGTERM: Railway lo envía al contenedor VIEJO cuando el nuevo ya está listo.
-// NO destruimos las sesiones WA — eso corrompería los archivos LocalAuth que
-// el nuevo contenedor necesita para reconectar sin QR.
-// Solo marcamos isShuttingDown para que ningún timer intente reconectar.
-// Railway hará SIGKILL después del grace period; Chromium muere limpio y los
-// archivos de sesión quedan íntegros.
-process.on('SIGTERM', () => {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  console.log('[shutdown] SIGTERM recibido — deteniendo reconexiones (Railway hará SIGKILL)');
-  // No llamar process.exit() — dejamos que Railway lo haga con SIGKILL
-  // para no interrumpir escrituras de LocalAuth de Chromium
-});
-process.on('SIGINT', () => {
-  isShuttingDown = true;
-  console.log('[shutdown] SIGINT recibido — saliendo');
-  process.exit(0);
-});
-
-// DATA_DIR: configurable via env var para que coincida con el mount point del volumen en Railway.
-// En Railway: Variables → agregar DATA_DIR=/data (o el path donde está montado el volumen).
-// Si no se configura, usa .wwebjs_auth relativo al script (funciona en local).
-const DATA_DIR = process.env.DATA_DIR
-  ? path.resolve(process.env.DATA_DIR)
-  : path.join(__dirname, '.wwebjs_auth');
+const DATA_DIR = path.join(__dirname, '.wwebjs_auth');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-console.log(`[config] DATA_DIR = ${DATA_DIR}`);
-
-// ── Registro persistente de sesiones ────────────────────────────
-// Este archivo SOLO se modifica intencionalmente (connect / manual disconnect).
-// Nunca se toca por crashes, SIGKILL o eventos de desconexión involuntaria.
-// Eso garantiza que siempre sepamos qué sesiones deben estar activas.
-const REGISTRY_FILE = path.join(DATA_DIR, 'sessions_registry.json');
-
-function registryLoad() {
-  try { return JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8')); } catch(e) { return {}; }
-}
-function registryAdd(id) {
-  const r = registryLoad(); r[id] = { since: Date.now() };
-  try { fs.writeFileSync(REGISTRY_FILE, JSON.stringify(r, null, 2)); } catch(e) {}
-}
-function registryRemove(id) {
-  const r = registryLoad(); delete r[id];
-  try { fs.writeFileSync(REGISTRY_FILE, JSON.stringify(r, null, 2)); } catch(e) {}
-}
-function registryIds() { return Object.keys(registryLoad()); }
 
 // Mapa chatId real por teléfono normalizado: { restauranteId: { phone10: fullChatId } }
 // Permite enviar notificaciones al chatId correcto aunque sea @lid u otro formato
@@ -210,37 +163,14 @@ function createSession(restauranteId) {
 
   console.log(`[${restauranteId}] Creando nueva sesión WhatsApp... (baseId=${baseId})`);
 
-  const authDirCheck = path.join(DATA_DIR, `session-${restauranteId}`);
-
   // Si la carpeta de auth tiene marcador de invalidación, borrarla ahora
+  const authDirCheck = path.join(DATA_DIR, `session-${restauranteId}`);
   if (fs.existsSync(path.join(authDirCheck, '.invalidated'))) {
     console.log(`[${restauranteId}] Carpeta auth inválida detectada — eliminando`);
     try { fs.rmSync(authDirCheck, { recursive: true, force: true }); } catch(e) {
       console.warn(`[${restauranteId}] No se pudo eliminar authDir inválido:`, e.message);
     }
   }
-
-  // Limpiar archivos de bloqueo de Chromium que quedan cuando el contenedor
-  // anterior fue matado con SIGKILL. SingletonLock es un SYMLINK ROTO que apunta
-  // al hostname:pid del contenedor viejo. fs.existsSync() sigue el symlink y
-  // devuelve false cuando el destino no existe — por eso hay que usar lstatSync()
-  // que inspecciona el symlink mismo, no su destino.
-  function removeLock(f) {
-    try {
-      fs.lstatSync(f); // lanza si no existe ni como symlink ni como archivo
-      fs.unlinkSync(f);
-      console.log(`[${restauranteId}] 🔓 Lock eliminado: ${path.basename(f)}`);
-    } catch(e) { /* no existe — ok */ }
-  }
-  removeLock(path.join(authDirCheck, 'SingletonLock'));
-  removeLock(path.join(authDirCheck, 'SingletonSocket'));
-  removeLock(path.join(authDirCheck, 'SingletonCookieLock'));
-  removeLock(path.join(authDirCheck, '.org.chromium.Chromium'));
-  try {
-    removeLock(path.join(authDirCheck, 'Default', 'LOCK'));
-  } catch(e) {}
-  // También eliminar archivos de error anteriores para diagnóstico limpio
-  try { fs.unlinkSync(path.join(DATA_DIR, `init_error_${restauranteId}.txt`)); } catch(e) {}
 
   const client = new Client({
     authStrategy: new LocalAuth({
@@ -264,8 +194,6 @@ function createSession(restauranteId) {
         '--hide-scrollbars',
         '--mute-audio',
         '--safebrowsing-disable-auto-update',
-        '--no-first-run',
-        '--disable-features=ChromeWhatsNewUI,HttpsUpgrades',
       ]
     }
   });
@@ -286,11 +214,10 @@ function createSession(restauranteId) {
 
   function writeSessionConnected() {
     const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
+    if (fs.existsSync(sesPath)) return; // ya escrito
     const phone = client.info?.wid?.user || 'N/A';
     console.log(`[${restauranteId}] ✅ Sesión activa detectada — phone: ${phone}`);
     fs.writeFileSync(sesPath, JSON.stringify({ status: 'connected', phone }));
-    // Registrar en el registro persistente — sobrevive cualquier tipo de reinicio
-    registryAdd(restauranteId);
     if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
     if (readyCheckInterval) { clearInterval(readyCheckInterval); readyCheckInterval = null; }
   }
@@ -338,7 +265,6 @@ function createSession(restauranteId) {
     lastMsgTs[restauranteId] = Date.now();
     if (watchdogTimers[restauranteId]) clearInterval(watchdogTimers[restauranteId]);
     watchdogTimers[restauranteId] = setInterval(async () => {
-      if (isShuttingDown) return;
       try {
         const state = await client.getState();
         console.log(`[${restauranteId}] [watchdog] estado=${state}`);
@@ -349,7 +275,7 @@ function createSession(restauranteId) {
           delete sessions[restauranteId];
           const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
           if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
-          if (!isShuttingDown && !manuallyDisconnected.has(restauranteId)) {
+          if (!manuallyDisconnected.has(restauranteId)) {
             setTimeout(() => createSession(restauranteId), 3000);
           }
         }
@@ -360,7 +286,7 @@ function createSession(restauranteId) {
         delete sessions[restauranteId];
         const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
         if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
-        if (!isShuttingDown && !manuallyDisconnected.has(restauranteId)) {
+        if (!manuallyDisconnected.has(restauranteId)) {
           setTimeout(() => createSession(restauranteId), 5000);
         }
       }
@@ -379,46 +305,33 @@ function createSession(restauranteId) {
   client.on('disconnected', (reason) => {
     console.log(`[${restauranteId}] Desconectado: ${reason}`);
     if (watchdogTimers[restauranteId]) { clearInterval(watchdogTimers[restauranteId]); delete watchdogTimers[restauranteId]; }
+    const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
+    if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
     delete sessions[restauranteId];
 
-    // Si estamos en proceso de apagado (SIGTERM), no reconectar
-    if (isShuttingDown) {
-      console.log(`[${restauranteId}] Apagando — no reconectar`);
-      return;
-    }
-
-    // Desconexión manual: limpiar registro y auth — NO reconectar
+    // Nunca reconectar si el usuario desconectó manualmente
     if (manuallyDisconnected.has(restauranteId)) {
-      console.log(`[${restauranteId}] Desconexión manual — limpiando registro`);
-      registryRemove(restauranteId);
-      const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
-      if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
+      console.log(`[${restauranteId}] Desconexión manual — no reconectar (razón: ${reason})`);
+      // Asegurar que los archivos de auth estén borrados
       const authDir = path.join(DATA_DIR, `session-${restauranteId}`);
       try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
       return;
     }
 
-    // Logout intencional desde otro dispositivo — no reconectar
-    if (['LOGOUT'].includes(reason)) {
-      console.log(`[${restauranteId}] LOGOUT desde otro dispositivo — limpiando`);
-      registryRemove(restauranteId);
-      const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
-      if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
+    // Auto-reconexión solo para desconexiones de red (no logout intencional)
+    const noReconnect = ['LOGOUT', 'CONFLICT'];
+    if (noReconnect.includes(reason)) {
+      console.log(`[${restauranteId}] Logout intencional — no reconectar`);
       return;
     }
 
-    // Para CUALQUIER otra razón (CONFLICT, crash, red, reinicio del bridge):
-    // NO borrar session_*.json ni el registro → el heartbeat reconectará
-    const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
-    if (!fs.existsSync(sesPath)) {
-      // Escribir el archivo para que el heartbeat sepa que debe reconectar
-      try { fs.writeFileSync(sesPath, JSON.stringify({ status: 'reconnecting', reason })); } catch(e) {}
-    }
-
-    console.log(`[${restauranteId}] 🔄 Reconectando en 8s... (razón: ${reason})`);
+    console.log(`[${restauranteId}] 🔄 Reconectando en 10s...`);
     setTimeout(() => {
-      if (!sessions[restauranteId]) createSession(restauranteId);
-    }, 8000);
+      if (!sessions[restauranteId]) {
+        console.log(`[${restauranteId}] 🔄 Iniciando reconexión automática`);
+        createSession(restauranteId);
+      }
+    }, 10000);
   });
 
   // Deduplicador: evita procesar el mismo mensaje dos veces si disparan ambos eventos
@@ -488,33 +401,32 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] Respondiendo a chatId=${chatId} | Link: ${storeLink}`);
 
     // --- PEDIDO ACTIVO: no responder si el cliente ya tiene un pedido en proceso ---
+    // Usar realPhone (número real resuelto) para mayor precisión en la búsqueda
+    // Intentar con realPhone primero; si falla, reintentar con `from`
     let tieneActivo = false;
-    // Usar siempre fullChatId como cid; probar con realPhone y luego con `from` como teléfono
-    const telCandidates = [...new Set([realPhone, from].filter(Boolean))];
-    for (const telParam of telCandidates) {
+    for (const telParam of [realPhone, from]) {
       try {
-        const url = `${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${encodeURIComponent(telParam)}&cid=${encodeURIComponent(fullChatId)}`;
-        console.log(`[${restauranteId}] Verificando pedido activo: tel=${telParam} cid=${fullChatId}`);
-        const activeRes = await fetch(url, { signal: AbortSignal.timeout(6000) });
+        const activeRes = await fetch(
+          `${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${encodeURIComponent(telParam)}&cid=${encodeURIComponent(fullChatId)}`,
+          { signal: AbortSignal.timeout(6000) }
+        );
         if (activeRes.ok) {
           const activeData = await activeRes.json();
-          console.log(`[${restauranteId}] Pedido activo resultado: ${JSON.stringify(activeData)}`);
           if (activeData.activo) { tieneActivo = true; break; }
           break; // respuesta válida (false) → no reintentar con el otro número
-        } else {
-          console.warn(`[${restauranteId}] activo.php respondió HTTP ${activeRes.status}`);
         }
       } catch(e) {
-        console.warn(`[${restauranteId}] Error verificando pedido activo con tel=${telParam}: ${e.message}`);
-        if (telParam === telCandidates[telCandidates.length - 1]) {
-          // Todos los intentos fallaron: silenciar para no interrumpir pedido existente
-          console.warn(`[${restauranteId}] Sin verificación disponible — silenciando respuesta automática`);
+        console.warn(`[${restauranteId}] Error verificando pedido activo con tel=${telParam}:`, e.message);
+        // Si el primer intento (realPhone) falla por red, probar con `from`
+        if (telParam === from) {
+          // Ambos fallaron: para evitar enviar durante un pedido activo, bloquear
+          console.warn(`[${restauranteId}] No se pudo verificar pedido activo — silenciando respuesta automática`);
           return;
         }
       }
     }
     if (tieneActivo) {
-      console.log(`[${restauranteId}] ✋ Cliente ${realPhone} tiene pedido activo — sin respuesta automática`);
+      console.log(`[${restauranteId}] Cliente ${realPhone} tiene pedido activo — sin respuesta automática`);
       return;
     }
 
@@ -583,23 +495,13 @@ function createSession(restauranteId) {
 
   console.log(`[${restauranteId}] Iniciando cliente WhatsApp...`);
   client.initialize().catch(err => {
-    const errMsg = `${new Date().toISOString()} | ${err.message}`;
-    console.error(`[${restauranteId}] ❌ FATAL initialize(): ${err.message}`);
-    console.error(`[${restauranteId}] Stack: ${err.stack}`);
-    // Guardar error en disco para verlo desde /health/detail
-    try { fs.writeFileSync(path.join(DATA_DIR, `init_error_${restauranteId}.txt`), errMsg + '\n' + (err.stack || '')); } catch(e) {}
+    console.error(`[${restauranteId}] FATAL initialize():`, err.message);
     delete sessions[restauranteId];
+    // Limpiar archivos para forzar QR nuevo en el próximo intento
     const qrPath = path.join(DATA_DIR, `qr_${restauranteId}.json`);
     const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
-    if (fs.existsSync(qrPath)) try { fs.unlinkSync(qrPath); } catch(e) {}
-    if (fs.existsSync(sesPath)) try { fs.unlinkSync(sesPath); } catch(e) {}
-    // Reintentar en 30 segundos si no fue desconexión manual
-    if (!isShuttingDown && !manuallyDisconnected.has(restauranteId)) {
-      console.log(`[${restauranteId}] 🔄 Reintentando initialize() en 30s...`);
-      setTimeout(() => {
-        if (!isShuttingDown && !sessions[restauranteId]) createSession(restauranteId);
-      }, 30000);
-    }
+    if (fs.existsSync(qrPath)) fs.unlinkSync(qrPath);
+    if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
   });
 
   sessions[restauranteId] = client;
@@ -615,56 +517,6 @@ app.get('/', (req, res) => res.json({
 }));
 
 app.get('/health', (req, res) => res.status(200).json({ status: 'OK', uptime: process.uptime() }));
-
-// Diagnóstico detallado: muestra registro, sesiones activas y archivos del volumen
-app.get('/health/detail', (req, res) => {
-  try {
-    const registry = registryLoad();
-    const activeSessions = Object.keys(sessions).map(id => ({
-      id, connected: !!(sessions[id]?.info?.wid)
-    }));
-    let volumeFiles = [];
-    try { volumeFiles = fs.readdirSync(DATA_DIR); } catch(e) {}
-
-    // Verificar lock files y estado de carpetas de sesión
-    const sessionDiag = {};
-    Object.keys(registry).forEach(id => {
-      const dir = path.join(DATA_DIR, `session-${id}`);
-      const locks = ['SingletonLock','SingletonSocket','SingletonCookieLock'].map(l => path.join(dir, l));
-      sessionDiag[id] = {
-        authDirExists: fs.existsSync(dir),
-        lockFiles: locks.filter(l => fs.existsSync(l)).map(l => path.basename(l)),
-        defaultLock: fs.existsSync(path.join(dir, 'Default', 'LOCK')),
-      };
-    });
-
-    // Verificar binario de Chromium
-    const chromiumPath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
-    const chromiumExists = fs.existsSync(chromiumPath);
-
-    // Leer errores de initialize() guardados en disco
-    const initErrors = {};
-    volumeFiles.filter(f => f.startsWith('init_error_')).forEach(f => {
-      const id = f.replace('init_error_', '').replace('.txt', '');
-      try { initErrors[id] = fs.readFileSync(path.join(DATA_DIR, f), 'utf8').substring(0, 500); } catch(e) {}
-    });
-
-    res.json({
-      uptime: process.uptime(),
-      isShuttingDown,
-      dataDir: DATA_DIR,
-      chromiumPath,
-      chromiumExists,
-      registry,
-      activeSessions,
-      sessionDiag,
-      initErrors,
-      volumeFiles,
-    });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
 app.post('/session/start', async (req, res) => {
   const { restaurante_id, force_fresh } = req.body;
@@ -683,8 +535,15 @@ app.post('/session/start', async (req, res) => {
     await clearSessionData(restaurante_id);
   }
 
-  // Solo limpiar el flag de desconexión manual si el usuario inició la sesión explícitamente
-  if (force_fresh) clearManuallyDisconnected(restaurante_id);
+  // Limpiar flag de desconexión manual para este ID y para el ID base (sin nonce),
+  // de lo contrario el heartbeat nunca recuperaría la nueva sesión si cayera.
+  if (force_fresh) {
+    clearManuallyDisconnected(restaurante_id);
+    const baseIdStart = restaurante_id.includes('_')
+      ? restaurante_id.substring(0, restaurante_id.lastIndexOf('_'))
+      : null;
+    if (baseIdStart) clearManuallyDisconnected(baseIdStart);
+  }
   createSession(restaurante_id);
   res.json({ status: 'starting', message: 'Iniciando cliente de WhatsApp...' });
 });
@@ -696,28 +555,18 @@ const manuallyDisconnected = new Set();
 function markManuallyDisconnected(id) {
   manuallyDisconnected.add(id);
   try { fs.writeFileSync(path.join(DATA_DIR, `disconnected_${id}`), '1'); } catch(e) {}
-  registryRemove(id); // sacar del registro persistente para no reconectar en startup
 }
 function clearManuallyDisconnected(id) {
   manuallyDisconnected.delete(id);
   try { const f = path.join(DATA_DIR, `disconnected_${id}`); if (fs.existsSync(f)) fs.unlinkSync(f); } catch(e) {}
 }
 
-// Al iniciar: restaurar flags de desconexión manual desde disco.
-// Limpiamos archivos disconnected_ de IDs que ya están en el registro activo
-// (sesiones que fallaron en el pasado pero luego se reconectaron correctamente).
+// Al iniciar: restaurar flags de desconexión manual desde disco
 try {
-  const activeRegistry = registryLoad();
   fs.readdirSync(DATA_DIR).filter(f => f.startsWith('disconnected_')).forEach(f => {
     const id = f.replace('disconnected_', '');
-    // Si este ID está en el registro, es una sesión activa — borrar el flag huérfano
-    if (activeRegistry[id]) {
-      try { fs.unlinkSync(path.join(DATA_DIR, f)); } catch(e) {}
-      console.log(`[startup] 🧹 Flag disconnected huérfano eliminado: ${id}`);
-    } else {
-      manuallyDisconnected.add(id);
-      console.log(`[startup] Desconexión manual restaurada: ${id}`);
-    }
+    manuallyDisconnected.add(id);
+    console.log(`[startup] Restaurando desconexión manual: ${id}`);
   });
 } catch(e) {}
 
@@ -880,58 +729,6 @@ app.get('/session/:id/chats', async (req, res) => {
   }
 });
 
-// GET /session/:id/contacts — contactos de chats recientes (clientes que escribieron)
-// Para cuentas WhatsApp Business la libreta de contactos no aplica;
-// usamos los chats individuales recientes como fuente de contactos.
-// Acepta tanto el ID completo (con nonce) como el ID base del restaurante.
-app.get('/session/:id/contacts', async (req, res) => {
-  const id = req.params.id;
-  let client = sessions[id];
-  if (!client || !client.info) {
-    const found = findClientByBaseId(id);
-    if (found) client = found.client;
-  }
-  if (!client || !client.info) return res.status(400).json({ error: 'Session not ready' });
-  try {
-    // Obtener chats individuales recientes (no grupos, no broadcast)
-    const chats = await client.getChats();
-    const mapped = [];
-    const seen = new Set();
-    for (const chat of chats) {
-      try {
-        if (chat.isGroup || !chat.id || !chat.id._serialized) continue;
-        const ser = chat.id._serialized;
-        if (!ser.endsWith('@c.us') && !ser.endsWith('@lid')) continue;
-
-        // chatId real para envío directo (funciona con @c.us y @lid)
-        const chatId = ser;
-        let phone = chat.id.user || '';
-        let name = chat.name || '';
-
-        try {
-          const contact = await chat.getContact();
-          if (contact) {
-            // contact.number tiene el teléfono real para @c.us; para @lid puede ser el mismo LID
-            const num = (contact.number || '').replace(/\D/g, '');
-            if (num && /^\d{7,15}$/.test(num)) phone = num; // número real válido
-            if (contact.pushname || contact.name) name = contact.pushname || contact.name;
-          }
-        } catch(e2) {}
-
-        if (!name) name = phone || chatId;
-        // Evitar duplicados por chatId
-        if (seen.has(chatId)) continue;
-        seen.add(chatId);
-        mapped.push({ phone, name, chatId });
-        if (mapped.length >= 500) break;
-      } catch(e2) {}
-    }
-    res.json({ contacts: mapped });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 app.get('/session/:id/chat/:chatId/messages', async (req, res) => {
   const { id, chatId } = req.params;
   const client = sessions[id];
@@ -1028,91 +825,27 @@ app.post('/status', async (req, res) => {
 // ========================================
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 Servidor Express vivo en puerto ${PORT}`);
-  console.log(`📡 DATA_DIR resuelto: ${DATA_DIR}`);
-  console.log(`📡 REGISTRY_FILE: ${REGISTRY_FILE}`);
-
-  // ── Diagnóstico de volumen Railway ──────────────────────────
-  try {
-    const exists = fs.existsSync(DATA_DIR);
-    console.log(`[startup] DATA_DIR existe: ${exists}`);
-    if (exists) {
-      const files = fs.readdirSync(DATA_DIR);
-      console.log(`[startup] Archivos en DATA_DIR (${files.length}): ${files.join(', ') || '(vacío)'}`);
-    }
-    const regExists = fs.existsSync(REGISTRY_FILE);
-    console.log(`[startup] sessions_registry.json existe: ${regExists}`);
-    if (regExists) {
-      const raw = fs.readFileSync(REGISTRY_FILE, 'utf8');
-      console.log(`[startup] Contenido del registro: ${raw}`);
-    }
-  } catch(diagErr) {
-    console.warn('[startup] Error en diagnóstico:', diagErr.message);
-  }
-
-  // ── Auto-restaurar sesiones desde el registro persistente ────
-  // Esperamos STARTUP_DELAY ms antes de restaurar para que Railway tenga tiempo de
-  // enviar SIGTERM al contenedor viejo y matarlo limpiamente antes de que el nuevo
-  // intente conectar las mismas sesiones WA (evita el evento CONFLICT).
-  const STARTUP_DELAY = parseInt(process.env.STARTUP_DELAY || '15000'); // 15s por defecto
-  console.log(`[startup] Esperando ${STARTUP_DELAY / 1000}s antes de restaurar sesiones (deja tiempo al SIGKILL del contenedor viejo)...`);
-
-  setTimeout(() => {
-    if (isShuttingDown) { console.log('[startup] Apagado en curso — no restaurar sesiones'); return; }
-    try {
-      const ids = registryIds().filter(id => !manuallyDisconnected.has(id));
-      if (ids.length === 0) {
-        console.log('[startup] Sin sesiones registradas que restaurar.');
-        // Verificar si hay carpetas de sesión LocalAuth huérfanas (conectadas antes del registro)
-        try {
-          const allFiles = fs.readdirSync(DATA_DIR);
-          const authFolders = allFiles.filter(f => {
-            try { return f.startsWith('session-') && fs.statSync(path.join(DATA_DIR, f)).isDirectory(); } catch(e) { return false; }
-          });
-          if (authFolders.length > 0) {
-            console.log(`[startup] ⚠️ Se encontraron ${authFolders.length} carpeta(s) LocalAuth sin registro: ${authFolders.join(', ')}`);
-            console.log('[startup] Restaurando sesiones desde carpetas LocalAuth existentes...');
-            authFolders.forEach((folder, i) => {
-              const sid = folder.replace('session-', '');
-              setTimeout(() => {
-                if (isShuttingDown || sessions[sid]) return;
-                console.log(`[startup] Iniciando sesión huérfana: ${sid}`);
-                registryAdd(sid);
-                createSession(sid);
-              }, i * 5000);
-            });
-          }
-        } catch(e2) { console.warn('[startup] Error buscando carpetas LocalAuth:', e2.message); }
-      } else {
-        console.log(`[startup] Restaurando ${ids.length} sesión(es) desde registro...`);
-        ids.forEach((id, i) => {
-          setTimeout(() => {
-            if (isShuttingDown || sessions[id]) return;
-            console.log(`[startup] Iniciando sesión: ${id}`);
-            createSession(id);
-          }, i * 5000);
-        });
-      }
-    } catch(e) {
-      console.warn('[startup] Error al restaurar sesiones:', e.message);
-    }
-  }, STARTUP_DELAY);
+  console.log(`📡 Esperando peticiones API...\n`);
 });
 
-// ── Heartbeat: cada 90s verifica sesiones del registro ────────
+// ── Heartbeat: cada 5 min restaura sesiones caídas (no las desconectadas manualmente) ───
 setInterval(() => {
-  if (isShuttingDown) return;
-  try {
-    const ids = registryIds().filter(id => !manuallyDisconnected.has(id));
-    ids.forEach(id => {
-      if (!sessions[id]) {
-        console.log(`[heartbeat] Sesión ${id} en registro pero no activa — reconectando`);
-        createSession(id);
-      }
-    });
-  } catch(e) {
-    console.warn('[heartbeat] Error:', e.message);
-  }
-}, 90 * 1000); // cada 90 segundos
+  const sesFiles = fs.readdirSync(DATA_DIR).filter(f => f.startsWith('session_') && f.endsWith('.json'));
+  sesFiles.forEach(file => {
+    const restauranteId = file.replace('session_', '').replace('.json', '');
+    if (manuallyDisconnected.has(restauranteId)) return; // desconectado por el usuario — no reconectar
+    // Si el ID base (sin nonce) está marcado como desconectado manual, tampoco reconectar variantes con nonce
+    const baseId = restauranteId.includes('_') ? restauranteId.substring(0, restauranteId.lastIndexOf('_')) : null;
+    if (baseId && manuallyDisconnected.has(baseId)) {
+      console.log(`[heartbeat] Saltando ${restauranteId} — ID base ${baseId} desconectado manualmente`);
+      return;
+    }
+    if (!sessions[restauranteId]) {
+      console.log(`[heartbeat] Reconectando sesión caída: ${restauranteId}`);
+      createSession(restauranteId);
+    }
+  });
+}, 5 * 60 * 1000);
 
 // ── Self-ping keepalive: evita que Railway duerma el contenedor (cold start) ───────────
 // Hace una petición HTTP al propio servidor cada 10 minutos para mantenerlo activo.
