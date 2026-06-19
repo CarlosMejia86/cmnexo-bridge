@@ -393,7 +393,7 @@ function createSession(restauranteId) {
     logActivity(restauranteId, { type: 'in', text: `${from}: ${body.substring(0, 40)}` });
 
     // Link usa siempre el ID (UUID inmutable) — más estable que el slug que puede cambiar
-    const storeLink = `${STORE_URL}/tienda.html?r=${baseId}&tel=${realPhone}&cid=${encodeURIComponent(fullChatId)}`;
+    const storeLink = `${STORE_URL}/tienda.php?r=${baseId}&tel=${realPhone}&cid=${encodeURIComponent(fullChatId)}`;
     const restName  = restaurantNames[restauranteId] || 'nuestro restaurante';
     const bl        = body.toLowerCase();
 
