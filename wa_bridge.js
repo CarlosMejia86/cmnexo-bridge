@@ -177,6 +177,11 @@ function createSession(restauranteId) {
       clientId: restauranteId,
       dataPath: DATA_DIR
     }),
+    webVersionCache: {
+      type: 'remote',
+      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+      strict: false
+    },
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
@@ -186,6 +191,7 @@ function createSession(restauranteId) {
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-zygote',
+        '--renderer-process-limit=1',
         '--disable-extensions',
         '--disable-background-networking',
         '--disable-default-apps',
@@ -194,6 +200,8 @@ function createSession(restauranteId) {
         '--hide-scrollbars',
         '--mute-audio',
         '--safebrowsing-disable-auto-update',
+        '--disable-software-rasterizer',
+        '--js-flags=--max-old-space-size=128',
       ]
     }
   });
