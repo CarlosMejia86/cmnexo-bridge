@@ -2,7 +2,7 @@
 # Configurado para consumo mínimo de RAM/CPU (< 300MB RAM, < 0.25 vCPU)
 FROM node:20-bookworm-slim
 
-# Instalar Chromium del sistema y dependencias mínimas requeridas por Chromium headless
+# Instalar Chromium del sistema, dependencias mínimas y tini para recolectar procesos zombi
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     fonts-liberation \
@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     libxss1 \
     procps \
+    tini \
     git \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -35,7 +36,7 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Limitar memoria de Node.js a 256MB para forzar recolección de basura temprana
 ENV NODE_ENV=production
-ENV NODE_OPTIONS="--max-old-space-size=256"
+ENV NODE_OPTIONS="--max-old-space-size=256 --expose-gc"
 
 WORKDIR /app
 
@@ -48,4 +49,6 @@ COPY . .
 
 EXPOSE 3000
 
+# Usar tini como PID 1 para limpiar automáticamente procesos zombi de Chromium
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["npm", "start"]

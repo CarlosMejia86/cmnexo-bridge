@@ -70,6 +70,15 @@ async function clearSessionData(id) {
     try { await client.logout(); } catch(e) {}
     try { await client.destroy(); } catch(e) {}
   }
+  if (Object.keys(sessions).length === 0) {
+    try {
+      const { exec } = require('child_process');
+      exec('pkill -f chromium || true');
+    } catch(e) {}
+  }
+  if (global.gc) {
+    try { global.gc(); } catch(e) {}
+  }
 
   // 2. Esperar a que Chromium libere los bloqueos de archivos
   await new Promise(r => setTimeout(r, 4000));
@@ -202,6 +211,9 @@ function createSession(restauranteId) {
         '--safebrowsing-disable-auto-update',
         '--disable-software-rasterizer',
         '--js-flags=--max-old-space-size=128',
+        '--disk-cache-size=10485760',
+        '--media-cache-size=10485760',
+        '--disable-application-cache',
       ]
     }
   });
@@ -524,7 +536,25 @@ app.get('/', (req, res) => res.json({
   data_dir: fs.existsSync(DATA_DIR) ? 'active' : 'missing'
 }));
 
-app.get('/health', (req, res) => res.status(200).json({ status: 'OK', uptime: process.uptime() }));
+app.get('/health', (req, res) => {
+  const m = process.memoryUsage();
+  res.status(200).json({
+    status: 'OK',
+    uptime: Math.round(process.uptime()),
+    memory_mb: {
+      rss: Math.round(m.rss / 1024 / 1024),
+      heapUsed: Math.round(m.heapUsed / 1024 / 1024),
+      heapTotal: Math.round(m.heapTotal / 1024 / 1024)
+    }
+  });
+});
+
+// Limpieza periódica de memoria RAM cada 5 minutos
+setInterval(() => {
+  if (global.gc) {
+    try { global.gc(); } catch(e) {}
+  }
+}, 5 * 60 * 1000);
 
 app.post('/session/start', async (req, res) => {
   const { restaurante_id, force_fresh } = req.body;
