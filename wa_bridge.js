@@ -801,6 +801,43 @@ app.post('/session/:id/chat/:chatId/send', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+// ── Inyección de WPPConnect (WA-JS) para soporte de estados en WhatsApp Web ──
+const WPP_LOCAL_FILE = path.join(__dirname, 'wppconnect-wa.js');
+let _wppBundle = null;
+
+async function injectWPP(pupPage) {
+  const ready = await pupPage.evaluate(() => {
+    return typeof window.WPP !== 'undefined' && window.WPP.webpack && window.WPP.webpack.isReady;
+  }).catch(() => false);
+  if (ready) return true;
+
+  if (!_wppBundle) {
+    if (fs.existsSync(WPP_LOCAL_FILE)) {
+      _wppBundle = fs.readFileSync(WPP_LOCAL_FILE, 'utf8');
+    } else {
+      try {
+        const npmPath = require.resolve('@wppconnect/wa-js/dist/wppconnect-wa.js');
+        if (fs.existsSync(npmPath)) _wppBundle = fs.readFileSync(npmPath, 'utf8');
+      } catch (e) {}
+    }
+    if (!_wppBundle) {
+      console.log('[/status] Descargando wa-js bundle de respaldo...');
+      const r = await fetch('https://cdn.jsdelivr.net/npm/@wppconnect/wa-js@latest/dist/wppconnect-wa.js');
+      if (!r.ok) throw new Error('No se pudo descargar wa-js: ' + r.statusText);
+      _wppBundle = await r.text();
+    }
+  }
+
+  await pupPage.addScriptTag({ content: _wppBundle });
+
+  // Esperar a que WPP inicialice el webpack de WhatsApp Web
+  await pupPage.waitForFunction(() => {
+    return typeof window.WPP !== 'undefined' && window.WPP.webpack && window.WPP.webpack.isReady;
+  }, { timeout: 20000 });
+
+  return true;
+}
+
 // ── Publicar estado de WhatsApp ──────────────────────────────
 // POST /status { restaurante_id, image_url, caption? }
 app.post('/status', async (req, res) => {
@@ -820,36 +857,43 @@ app.post('/status', async (req, res) => {
     let published = false;
     let lastErr   = '';
 
-    // Intento 1: sendMessage a status@broadcast
-    try {
-      await client.sendMessage('status@broadcast', media, { caption: caption || '' });
-      published = true;
-      console.log(`[/status] ✅ Publicado vía status@broadcast rest=${restaurante_id}`);
-    } catch (e1) {
-      lastErr = e1.message;
-      console.warn(`[/status] status@broadcast falló: ${e1.message}`);
+    // Método 1: WPPConnect (WA-JS) — Soporte real para estados de WhatsApp Web
+    if (client.pupPage) {
+      try {
+        console.log(`[/status] Inyectando WPPConnect para publicar estado rest=${restaurante_id}...`);
+        await injectWPP(client.pupPage);
+
+        const isVideo = (media.mimetype && media.mimetype.startsWith('video')) || false;
+        const dataUri = `data:${media.mimetype};base64,${media.data}`;
+
+        const statusRes = await client.pupPage.evaluate(async (dataUrl, cap, isVid) => {
+          if (!window.WPP || !window.WPP.status) {
+            throw new Error('Módulo WPP.status no disponible');
+          }
+          if (isVid) {
+            return await window.WPP.status.sendVideoStatus(dataUrl, { caption: cap || '' });
+          } else {
+            return await window.WPP.status.sendImageStatus(dataUrl, { caption: cap || '' });
+          }
+        }, dataUri, caption || '', isVideo);
+
+        console.log(`[/status] ✅ Estado publicado exitosamente vía WPP rest=${restaurante_id}:`, statusRes?.id || 'OK');
+        published = true;
+      } catch (wppErr) {
+        lastErr = wppErr.message;
+        console.warn(`[/status] WPP falló: ${wppErr.message}`);
+      }
     }
 
-    // Intento 2: pupPage con Store interno de WA
-    if (!published && client.pupPage) {
+    // Método 2 (fallback): sendMessage a status@broadcast
+    if (!published) {
       try {
-        await client.pupPage.evaluate(async (dataUrl, cap) => {
-          const resp = await fetch(dataUrl);
-          const blob = await resp.blob();
-          const file = new File([blob], 'status.jpg', { type: blob.type });
-          if (window.WWebJS && window.WWebJS.sendStatus) {
-            await window.WWebJS.sendStatus(file, cap);
-          } else if (window.Store && window.Store.sendStatus) {
-            await window.Store.sendStatus(file, cap);
-          } else {
-            throw new Error('Store no disponible');
-          }
-        }, `data:${media.mimetype};base64,${media.data}`, caption || '');
+        await client.sendMessage('status@broadcast', media, { caption: caption || '' });
         published = true;
-        console.log(`[/status] ✅ Publicado vía pupPage rest=${restaurante_id}`);
-      } catch (e2) {
-        lastErr = e2.message;
-        console.warn(`[/status] pupPage falló: ${e2.message}`);
+        console.log(`[/status] ✅ Publicado vía status@broadcast rest=${restaurante_id}`);
+      } catch (e1) {
+        lastErr = lastErr ? `${lastErr} | ${e1.message}` : e1.message;
+        console.warn(`[/status] status@broadcast falló: ${e1.message}`);
       }
     }
 
