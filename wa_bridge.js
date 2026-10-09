@@ -891,7 +891,9 @@ setInterval(() => {
 // de WhatsApp puede tardar 30-90 segundos en responderse.
 const SELF_URL = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/health`
-  : `http://localhost:${PORT}/health`;
+  : (process.env.RAILWAY_STATIC_URL
+    ? `https://${process.env.RAILWAY_STATIC_URL}/health`
+    : `https://cmnexo-bridge-production-4297.up.railway.app/health`);
 
 setInterval(() => {
   fetch(SELF_URL)

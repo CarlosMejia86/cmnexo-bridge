@@ -1,8 +1,8 @@
-# Dockerfile optimizado para Railway - Node 20 Bookworm Slim
+# Dockerfile ultra-optimizado para Railway - Node 20 Bookworm Slim
 # Configurado para consumo mínimo de RAM/CPU (< 300MB RAM, < 0.25 vCPU)
 FROM node:20-bookworm-slim
 
-# Instalar Chromium del sistema, dependencias mínimas y tini para recolectar procesos zombi
+# Instalar Chromium del sistema, dependencias mínimas y tini como supervisor de procesos zombi
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     fonts-liberation \
@@ -30,17 +30,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Configurar Puppeteer para usar Chromium del sistema sin descargas extra
+# Configurar Puppeteer para usar Chromium del sistema sin descargas pesadas
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Limitar memoria de Node.js a 256MB para forzar recolección de basura temprana
+# Limitar memoria de Node.js a 256MB y habilitar garbage collection manual
 ENV NODE_ENV=production
 ENV NODE_OPTIONS="--max-old-space-size=256 --expose-gc"
 
 WORKDIR /app
 
-# Copiar manifiesto e instalar dependencias de producción
+# Copiar package.json e instalar solo dependencias de producción
 COPY package.json ./
 RUN npm install --omit=dev
 
@@ -49,6 +49,6 @@ COPY . .
 
 EXPOSE 3000
 
-# Usar tini como PID 1 para limpiar automáticamente procesos zombi de Chromium
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["npm", "start"]
+# tini se ejecuta como PID 1 para matar automáticamente procesos huérfanos de Chromium
+ENTRYPOINT ["tini", "--"]
+CMD ["node", "--max-old-space-size=256", "--expose-gc", "wa_bridge.js"]
