@@ -807,11 +807,11 @@ app.post('/status', async (req, res) => {
   const { restaurante_id, image_url, caption } = req.body;
   if (!restaurante_id || !image_url) return res.status(400).json({ error: 'Faltan datos' });
 
-  const sessionId = Object.keys(sessions).find(k =>
-    k === String(restaurante_id) || k.startsWith(String(restaurante_id) + '_')
-  );
-  const client = sessions[sessionId];
-  if (!client || !client.info) return res.status(400).json({ error: 'Sin sesión activa. Conecta WhatsApp primero.' });
+  const found = findClientByBaseId(restaurante_id);
+  if (!found || !found.client || !found.client.info) {
+    return res.status(400).json({ error: 'Sin sesión activa. Conecta WhatsApp primero en Ajustes.' });
+  }
+  const { client, sessionId } = found;
 
   try {
     const { MessageMedia } = require('whatsapp-web.js');
