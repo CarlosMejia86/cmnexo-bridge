@@ -818,6 +818,7 @@ app.post('/status', async (req, res) => {
     const media = await MessageMedia.fromUrl(image_url, { unsafeMime: true });
 
     let published = false;
+    let lastErr   = '';
 
     // Intento 1: sendMessage a status@broadcast
     try {
@@ -825,11 +826,12 @@ app.post('/status', async (req, res) => {
       published = true;
       console.log(`[/status] ✅ Publicado vía status@broadcast rest=${restaurante_id}`);
     } catch (e1) {
+      lastErr = e1.message;
       console.warn(`[/status] status@broadcast falló: ${e1.message}`);
     }
 
     // Intento 2: pupPage con Store interno de WA
-    if (!published) {
+    if (!published && client.pupPage) {
       try {
         await client.pupPage.evaluate(async (dataUrl, cap) => {
           const resp = await fetch(dataUrl);
@@ -846,18 +848,19 @@ app.post('/status', async (req, res) => {
         published = true;
         console.log(`[/status] ✅ Publicado vía pupPage rest=${restaurante_id}`);
       } catch (e2) {
+        lastErr = e2.message;
         console.warn(`[/status] pupPage falló: ${e2.message}`);
       }
     }
 
-    // Si falló WA pero la imagen se subió bien → devolver ok igual (guardado en DB)
     if (!published) {
-      console.warn(`[/status] Ambos métodos fallaron — estado guardado en DB sin confirmar WA`);
+      console.warn(`[/status] Falló publicación de estado para rest=${restaurante_id}: ${lastErr}`);
+      return res.status(502).json({ error: 'No se pudo publicar en el estado de WhatsApp (' + (lastErr || 'error de cliente') + ').', wa_published: false });
     }
-    res.json({ success: true, wa_published: published });
+    res.json({ success: true, wa_published: true });
   } catch (e) {
     console.error(`[/status] Error general:`, e.message);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: e.message, wa_published: false });
   }
 });
 // ========================================
