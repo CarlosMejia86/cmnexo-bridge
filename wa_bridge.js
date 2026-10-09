@@ -31,8 +31,40 @@ function normalizePhone(raw) {
 }
 
 const sessions = {};
-const DATA_DIR = path.join(__dirname, '.wwebjs_auth');
+let isShuttingDown = false;
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '.wwebjs_auth');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+/**
+ * Elimina bloqueos residuales de Chromium (SingletonLock, etc.)
+ * que quedan tras caídas o reinicios de contenedor y que impiden
+ * que Chromium vuelva a iniciar la sesión existente.
+ */
+function removeChromiumLocks(sessionId) {
+  const authDir = path.join(DATA_DIR, `session-${sessionId}`);
+  if (!fs.existsSync(authDir)) return;
+  const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'parent.lock'];
+  try {
+    function walkAndClean(dir, depth = 0) {
+      if (depth > 4 || !fs.existsSync(dir)) return;
+      const items = fs.readdirSync(dir, { withFileTypes: true });
+      for (const item of items) {
+        const p = path.join(dir, item.name);
+        if (item.isDirectory()) {
+          walkAndClean(p, depth + 1);
+        } else if (lockFiles.includes(item.name)) {
+          try {
+            fs.unlinkSync(p);
+            console.log(`[${sessionId}] 🔓 Bloqueo Chromium eliminado: ${item.name}`);
+          } catch(e) {}
+        }
+      }
+    }
+    walkAndClean(authDir);
+  } catch(e) {
+    console.warn(`[${sessionId}] Advertencia limpiando locks:`, e.message);
+  }
+}
 
 // Mapa chatId real por teléfono normalizado: { restauranteId: { phone10: fullChatId } }
 // Permite enviar notificaciones al chatId correcto aunque sea @lid u otro formato
@@ -181,6 +213,9 @@ function createSession(restauranteId) {
       console.warn(`[${restauranteId}] No se pudo eliminar authDir inválido:`, e.message);
     }
   }
+
+  // Eliminar bloqueos residuales de Chromium para garantizar apertura limpia del perfil
+  removeChromiumLocks(restauranteId);
 
   const client = new Client({
     authStrategy: new LocalAuth({
@@ -334,33 +369,42 @@ function createSession(restauranteId) {
   client.on('disconnected', (reason) => {
     console.log(`[${restauranteId}] Desconectado: ${reason}`);
     if (watchdogTimers[restauranteId]) { clearInterval(watchdogTimers[restauranteId]); delete watchdogTimers[restauranteId]; }
-    const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
-    if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
     delete sessions[restauranteId];
 
-    // Nunca reconectar si el usuario desconectó manualmente
+    // Si el servidor se está apagando o reiniciando por deploy, NO borrar ningún archivo de sesión
+    if (isShuttingDown) {
+      console.log(`[${restauranteId}] Servidor apagándose/reiniciando — credenciales preservadas en disco.`);
+      return;
+    }
+
+    // Nunca reconectar si el usuario desconectó manualmente desde el panel
     if (manuallyDisconnected.has(restauranteId)) {
       console.log(`[${restauranteId}] Desconexión manual — no reconectar (razón: ${reason})`);
-      // Asegurar que los archivos de auth estén borrados
+      const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
+      if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
       const authDir = path.join(DATA_DIR, `session-${restauranteId}`);
       try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
       return;
     }
 
-    // Auto-reconexión solo para desconexiones de red (no logout intencional)
-    const noReconnect = ['LOGOUT', 'CONFLICT'];
-    if (noReconnect.includes(reason)) {
-      console.log(`[${restauranteId}] Logout intencional — no reconectar`);
+    // Si es un logout intencional desde WhatsApp móvil (dispositivo desvinculado)
+    if (reason === 'LOGOUT') {
+      console.log(`[${restauranteId}] 📱 Logout detectado desde el teléfono — limpiando sesión`);
+      const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
+      if (fs.existsSync(sesPath)) fs.unlinkSync(sesPath);
+      const authDir = path.join(DATA_DIR, `session-${restauranteId}`);
+      try { if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true }); } catch(e) {}
       return;
     }
 
-    console.log(`[${restauranteId}] 🔄 Reconectando en 10s...`);
+    // Para cualquier otra causa (caída de red, restart, etc.), preservar session_*.json y reintentar
+    console.log(`[${restauranteId}] 🔄 Reconexión automática programada en 8s... (razón: ${reason})`);
     setTimeout(() => {
-      if (!sessions[restauranteId]) {
-        console.log(`[${restauranteId}] 🔄 Iniciando reconexión automática`);
+      if (!sessions[restauranteId] && !manuallyDisconnected.has(restauranteId) && !isShuttingDown) {
+        console.log(`[${restauranteId}] 🔄 Ejecutando reconexión automática`);
         createSession(restauranteId);
       }
-    }, 10000);
+    }, 8000);
   });
 
   // Deduplicador: evita procesar el mismo mensaje dos veces si disparan ambos eventos
@@ -1124,30 +1168,132 @@ app.post('/status', async (req, res) => {
     res.status(500).json({ error: e.message, wa_published: false });
   }
 });
+// ── Restauración inteligente de todas las sesiones guardadas ─────────────────────────
+async function restoreAllSavedSessions() {
+  if (isShuttingDown) return;
+  console.log('[restore] 🔍 Verificando y restaurando sesiones guardadas en disco...');
+  const candidates = new Set();
+
+  try {
+    const entries = fs.readdirSync(DATA_DIR);
+    // 1. Archivos session_*.json
+    entries.filter(f => f.startsWith('session_') && f.endsWith('.json')).forEach(f => {
+      const id = f.replace('session_', '').replace('.json', '');
+      candidates.add(id);
+    });
+
+    // 2. Carpetas de autenticación session-* generadas por LocalAuth
+    entries.filter(f => f.startsWith('session-')).forEach(f => {
+      try {
+        const full = path.join(DATA_DIR, f);
+        if (fs.statSync(full).isDirectory()) {
+          const id = f.replace('session-', '');
+          candidates.add(id);
+        }
+      } catch(e) {}
+    });
+  } catch(e) {
+    console.warn('[restore] Error leyendo DATA_DIR:', e.message);
+    return;
+  }
+
+  const candidateList = Array.from(candidates);
+  for (const id of candidateList) {
+    if (isShuttingDown) break;
+
+    // Saltar si está desconectado manualmente
+    if (manuallyDisconnected.has(id)) {
+      console.log(`[restore] Saltando ${id} — marcado como desconectado manualmente`);
+      continue;
+    }
+    const baseId = id.includes('_') ? id.substring(0, id.lastIndexOf('_')) : null;
+    if (baseId && manuallyDisconnected.has(baseId)) {
+      console.log(`[restore] Saltando ${id} — ID base ${baseId} desconectado manualmente`);
+      continue;
+    }
+
+    // Verificar si la carpeta tiene marcador de invalidación
+    const authDir = path.join(DATA_DIR, `session-${id}`);
+    if (fs.existsSync(path.join(authDir, '.invalidated'))) {
+      console.log(`[restore] Saltando ${id} — carpeta marcada como inválida`);
+      continue;
+    }
+
+    // Si ya existe sesión conectada en memoria, nada que hacer
+    if (sessions[id]) {
+      const cur = sessions[id];
+      if (cur.info && cur.info.wid) continue;
+    }
+
+    console.log(`[restore] 🚀 Restaurando sesión de WhatsApp para restaurante: ${id}`);
+    createSession(id);
+
+    // Pausa escalonada de 4s entre inicios para no saturar memoria/CPU en Railway
+    await new Promise(r => setTimeout(r, 4000));
+  }
+}
+
 // ========================================
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 Servidor Express vivo en puerto ${PORT}`);
+  console.log(`📂 Directorio de sesiones (DATA_DIR): ${DATA_DIR}`);
   console.log(`📡 Esperando peticiones API...\n`);
+
+  // INMEDIATO: Restaurar todas las sesiones guardadas tan pronto arranca el servidor tras actualización
+  setTimeout(() => {
+    restoreAllSavedSessions().catch(e => console.error('[startup] Error restaurando sesiones:', e.message));
+  }, 1500);
 });
 
-// ── Heartbeat: cada 5 min restaura sesiones caídas (no las desconectadas manualmente) ───
+// ── Heartbeat periódico: cada 2 minutos verifica y restaura sesiones caídas ─────────────
 setInterval(() => {
-  const sesFiles = fs.readdirSync(DATA_DIR).filter(f => f.startsWith('session_') && f.endsWith('.json'));
-  sesFiles.forEach(file => {
-    const restauranteId = file.replace('session_', '').replace('.json', '');
-    if (manuallyDisconnected.has(restauranteId)) return; // desconectado por el usuario — no reconectar
-    // Si el ID base (sin nonce) está marcado como desconectado manual, tampoco reconectar variantes con nonce
-    const baseId = restauranteId.includes('_') ? restauranteId.substring(0, restauranteId.lastIndexOf('_')) : null;
-    if (baseId && manuallyDisconnected.has(baseId)) {
-      console.log(`[heartbeat] Saltando ${restauranteId} — ID base ${baseId} desconectado manualmente`);
-      return;
-    }
-    if (!sessions[restauranteId]) {
-      console.log(`[heartbeat] Reconectando sesión caída: ${restauranteId}`);
-      createSession(restauranteId);
+  if (!isShuttingDown) {
+    restoreAllSavedSessions().catch(e => console.warn('[heartbeat] Error en verificación:', e.message));
+  }
+}, 2 * 60 * 1000);
+
+// ── Cierre limpio (Graceful Shutdown) para preservar sesiones en despliegues de Railway ───
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`\n🛑 Señal ${signal} recibida (actualización / reinicio en curso).`);
+  console.log(`💾 Cerrando navegadores Chromium limpiamente para no corromper la autenticación de WhatsApp...`);
+
+  // 1. Guardar estado de todas las sesiones activas en session_*.json
+  for (const [id, client] of Object.entries(sessions)) {
+    try {
+      if (client.info && client.info.wid) {
+        const sesPath = path.join(DATA_DIR, `session_${id}.json`);
+        const phone = client.info.wid.user || 'N/A';
+        fs.writeFileSync(sesPath, JSON.stringify({ status: 'connected', phone, timestamp: Date.now() }));
+      }
+    } catch(e) {}
+  }
+
+  // 2. Cerrar navegadores Puppeteer ordenadamente (flush buffers a disco)
+  const closeTasks = Object.entries(sessions).map(async ([id, client]) => {
+    try {
+      if (client.pupBrowser) {
+        await client.pupBrowser.close();
+      } else if (client.destroy) {
+        await client.destroy();
+      }
+    } catch(e) {
+      console.warn(`[${id}] Error cerrando navegador:`, e.message);
     }
   });
-}, 5 * 60 * 1000);
+
+  await Promise.race([
+    Promise.allSettled(closeTasks),
+    new Promise(r => setTimeout(r, 6000))
+  ]);
+
+  console.log(`✅ Sesiones de WhatsApp preservadas exitosamente en disco. Proceso finalizado.`);
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // ── Self-ping keepalive: evita que Railway duerma el contenedor (cold start) ───────────
 // Hace una petición HTTP al propio servidor cada 10 minutos para mantenerlo activo.
