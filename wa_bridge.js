@@ -278,6 +278,13 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] ✅ WhatsApp listo (evento ready)`);
     writeSessionConnected();
 
+    // Pre-cargar WPP en segundo plano para que al publicar un estado responda en segundos
+    if (client.pupPage) {
+      setTimeout(() => {
+        injectWPP(client.pupPage).catch(e => console.warn(`[${restauranteId}] Pre-inyección WPP:`, e.message));
+      }, 3000);
+    }
+
     syncRestaurantData(restauranteId, baseId);
     setInterval(() => syncRestaurantData(restauranteId, baseId, 1), 15 * 60 * 1000);
 
@@ -807,7 +814,7 @@ let _wppBundle = null;
 
 async function injectWPP(pupPage) {
   const ready = await pupPage.evaluate(() => {
-    return typeof window.WPP !== 'undefined' && window.WPP.webpack && window.WPP.webpack.isReady;
+    return typeof window.WPP !== 'undefined' && (window.WPP.isReady || window.WPP.isFullReady);
   }).catch(() => false);
   if (ready) return true;
 
@@ -830,10 +837,12 @@ async function injectWPP(pupPage) {
 
   await pupPage.addScriptTag({ content: _wppBundle });
 
-  // Esperar a que WPP inicialice el webpack de WhatsApp Web
+  // Esperar a que WPP esté listo (máximo 5 segundos)
   await pupPage.waitForFunction(() => {
-    return typeof window.WPP !== 'undefined' && window.WPP.webpack && window.WPP.webpack.isReady;
-  }, { timeout: 20000 });
+    return typeof window.WPP !== 'undefined' && (window.WPP.isReady || window.WPP.isFullReady);
+  }, { timeout: 5000 }).catch(() => {
+    console.warn('[/status] WPP.isReady tardó más de 5s, continuando...');
+  });
 
   return true;
 }
