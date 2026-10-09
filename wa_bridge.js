@@ -7,7 +7,8 @@ const cors    = require('cors');
 
 const app     = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '30mb' }));
+app.use(express.urlencoded({ extended: true, limit: '30mb' }));
 
 const PORT      = process.env.PORT      || 3000;
 const API_URL   = process.env.API_URL   || 'https://cmnexo.com/api';
@@ -689,10 +690,73 @@ function findClientByBaseId(baseId) {
   return null;
 }
 
+// ── Carga y procesamiento seguro de medios (Base64 o URL remota) ──
+async function loadMediaSafe(source) {
+  if (!source || typeof source !== 'string') return null;
+  const src = source.trim();
+
+  // 1. Data URI Base64 directa (data:image/...;base64,...)
+  if (src.startsWith('data:')) {
+    const match = src.match(/^data:([a-zA-Z0-9\/+.-]+);base64,(.+)$/s);
+    if (match) {
+      const mime = match[1].split(';')[0].trim().toLowerCase();
+      const b64 = match[2].replace(/\s/g, '');
+      const ext = mime.split('/')[1] || 'jpg';
+      return new MessageMedia(mime, b64, `mkt_${Date.now()}.${ext}`);
+    }
+  }
+
+  // 2. Base64 puro sin encabezado data:
+  if (!src.startsWith('http://') && !src.startsWith('https://') && src.length > 200) {
+    return new MessageMedia('image/jpeg', src.replace(/\s/g, ''), `mkt_${Date.now()}.jpg`);
+  }
+
+  // 3. URL remota
+  let url = src;
+  if (url.startsWith('http://cmnexo.com')) {
+    url = url.replace('http://cmnexo.com', 'https://cmnexo.com');
+  }
+
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'image/*,video/*,*/*'
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(20000)
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} al descargar media (${url})`);
+
+    const arrayBuf = await resp.arrayBuffer();
+    const buffer = Buffer.from(arrayBuf);
+    const b64 = buffer.toString('base64');
+
+    let mime = (resp.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!mime || mime === 'application/octet-stream' || !mime.includes('/')) {
+      if (/\.png(\?|$)/i.test(url)) mime = 'image/png';
+      else if (/\.webp(\?|$)/i.test(url)) mime = 'image/webp';
+      else if (/\.gif(\?|$)/i.test(url)) mime = 'image/gif';
+      else if (/\.mp4(\?|$)/i.test(url)) mime = 'video/mp4';
+      else mime = 'image/jpeg';
+    }
+
+    const ext = mime.split('/')[1] || 'jpg';
+    return new MessageMedia(mime, b64, `mkt_${Date.now()}.${ext}`, buffer.length);
+  } catch (fetchErr) {
+    console.warn(`[loadMediaSafe] Fetch nativo falló (${fetchErr.message}), intentando MessageMedia.fromUrl...`);
+    const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
+    if (media && media.mimetype) {
+      media.mimetype = media.mimetype.split(';')[0].trim().toLowerCase();
+    }
+    return media;
+  }
+}
+
 // Enviar mensaje WA a un teléfono desde la tienda
-// POST /notify { restaurante_id, phone, message, chat_id?, image_url? }
+// POST /notify { restaurante_id, phone, message, chat_id?, image_url?, image_data? }
 app.post('/notify', async (req, res) => {
-  const { restaurante_id, phone, message, chat_id, image_url } = req.body;
+  const { restaurante_id, phone, message, chat_id, image_url, image_data } = req.body;
   if (!restaurante_id || !message || (!phone && !chat_id)) return res.status(400).json({ error: 'Faltan datos' });
 
   const found = findClientByBaseId(restaurante_id);
@@ -711,24 +775,35 @@ app.post('/notify', async (req, res) => {
       const mappedChatId = chatIdMap[restaurante_id] && chatIdMap[restaurante_id][phoneNorm];
       chatId = mappedChatId || (phoneNorm + '@c.us');
     }
-    console.log(`[${sessionId}] Enviando notificación → chatId=${chatId}${image_url ? ' (con imagen)' : ''}`);
 
-    if (image_url) {
-      // Enviar imagen con caption usando MessageMedia.fromUrl
+    const hasMedia = !!(image_data || image_url);
+    console.log(`[${sessionId}] Enviando notificación → chatId=${chatId}${hasMedia ? ' (con imagen/media)' : ''}`);
+
+    if (hasMedia) {
+      let media = null;
       try {
-        const media = await MessageMedia.fromUrl(image_url, { unsafeMime: true });
-        await client.sendMessage(chatId, media, { caption: message });
-        logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: 🖼️ ${message.substring(0, 30)}` });
-      } catch(imgErr) {
-        console.warn(`[${sessionId}] Error cargando imagen, enviando solo texto:`, imgErr.message);
-        await client.sendMessage(chatId, message);
-        logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: ${message.substring(0, 40)}` });
+        media = await loadMediaSafe(image_data || image_url);
+      } catch (loadErr) {
+        console.warn(`[${sessionId}] Falló carga de medio (${loadErr.message})`);
+        if (image_data && image_url) {
+          try { media = await loadMediaSafe(image_url); } catch (e2) {}
+        }
       }
-    } else {
-      await client.sendMessage(chatId, message);
-      logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: ${message.substring(0, 40)}` });
+
+      if (media) {
+        try {
+          await client.sendMessage(chatId, media, { caption: message });
+          logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: 🖼️ ${message.substring(0, 30)}` });
+          return res.json({ ok: true, media: true });
+        } catch (sendMediaErr) {
+          console.error(`[${sessionId}] Falló client.sendMessage con media (${sendMediaErr.message}), enviando solo texto...`);
+        }
+      }
     }
 
+    // Envío solo texto (si no había media o falló el envío con media)
+    await client.sendMessage(chatId, message);
+    logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: ${message.substring(0, 40)}` });
     res.json({ ok: true });
   } catch(e) {
     console.error(`[${sessionId}] Error enviando notificación a ${phone}:`, e.message);
@@ -974,10 +1049,11 @@ async function applyStatusPatch(pupPage) {
 }
 
 // ── Publicar estado de WhatsApp ──────────────────────────────
-// POST /status { restaurante_id, image_url, caption? }
+// POST /status { restaurante_id, image_url, caption?, image_data? }
 app.post('/status', async (req, res) => {
-  const { restaurante_id, image_url, caption } = req.body;
-  if (!restaurante_id || !image_url) return res.status(400).json({ error: 'Faltan datos' });
+  const { restaurante_id, image_url, caption, image_data } = req.body;
+  const mediaSource = image_data || image_url;
+  if (!restaurante_id || !mediaSource) return res.status(400).json({ error: 'Faltan datos' });
 
   const found = findClientByBaseId(restaurante_id);
   if (!found || !found.client || !found.client.info) {
@@ -986,8 +1062,8 @@ app.post('/status', async (req, res) => {
   const { client, sessionId } = found;
 
   try {
-    const { MessageMedia } = require('whatsapp-web.js');
-    const media = await MessageMedia.fromUrl(image_url, { unsafeMime: true });
+    const media = await loadMediaSafe(mediaSource);
+    if (!media) throw new Error('No se pudo procesar la imagen/video');
 
     let published = false;
     let lastErr   = '';
