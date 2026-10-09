@@ -278,9 +278,10 @@ function createSession(restauranteId) {
     console.log(`[${restauranteId}] ✅ WhatsApp listo (evento ready)`);
     writeSessionConnected();
 
-    // Pre-cargar WPP en segundo plano para que al publicar un estado responda en segundos
+    // Pre-cargar WPP y aplicar parches de compatibilidad en segundo plano
     if (client.pupPage) {
       setTimeout(() => {
+        applyStatusPatch(client.pupPage).catch(e => console.warn(`[${restauranteId}] Pre-patch status:`, e.message));
         injectWPP(client.pupPage).catch(e => console.warn(`[${restauranteId}] Pre-inyección WPP:`, e.message));
       }, 3000);
     }
@@ -813,8 +814,9 @@ const WPP_LOCAL_FILE = path.join(__dirname, 'wppconnect-wa.js');
 let _wppBundle = null;
 
 async function injectWPP(pupPage) {
+  if (!pupPage) return false;
   const ready = await pupPage.evaluate(() => {
-    return typeof window.WPP !== 'undefined' && (window.WPP.isReady || window.WPP.isFullReady);
+    return typeof window.WPP !== 'undefined' && typeof window.WPP.status !== 'undefined';
   }).catch(() => false);
   if (ready) return true;
 
@@ -837,14 +839,138 @@ async function injectWPP(pupPage) {
 
   await pupPage.addScriptTag({ content: _wppBundle });
 
-  // Esperar a que WPP esté listo (máximo 5 segundos)
+  // Esperar a que WPP y su módulo de status estén inicializados (máximo 8s)
   await pupPage.waitForFunction(() => {
-    return typeof window.WPP !== 'undefined' && (window.WPP.isReady || window.WPP.isFullReady);
-  }, { timeout: 5000 }).catch(() => {
-    console.warn('[/status] WPP.isReady tardó más de 5s, continuando...');
+    return typeof window.WPP !== 'undefined' && typeof window.WPP.status !== 'undefined';
+  }, { timeout: 8000 }).catch(() => {
+    console.warn('[/status] WPP.status tardó más de 8s en inicializar');
   });
 
   return true;
+}
+
+// ── Parche para publicación de estados con media en versiones recientes de WhatsApp Web ──
+async function applyStatusPatch(pupPage) {
+  if (!pupPage) return;
+  await pupPage.evaluate(() => {
+    try {
+      // 1. Shim para canCheckStatusRankingPosterGating (removido por Meta/WhatsApp Web)
+      const gating = window.require && window.require('WAWebStatusGatingUtils');
+      if (gating && typeof gating.canCheckStatusRankingPosterGating !== 'function') {
+        gating.canCheckStatusRankingPosterGating = () => false;
+      }
+    } catch (e) {}
+
+    try {
+      // 2. Adaptador para sendStatusMediaMsgAction en WAWebSendStatusMsgAction
+      // WhatsApp Web modernizó la firma a { mediaMsgData, beforeSend, funnelContext }
+      const statusAction = window.require && window.require('WAWebSendStatusMsgAction');
+      if (statusAction && statusAction.sendStatusMediaMsgAction && !statusAction._cmnexoPatched) {
+        const origMedia = statusAction.sendStatusMediaMsgAction;
+        statusAction.sendStatusMediaMsgAction = async function(...args) {
+          if (args.length >= 1 && (!args[0] || !args[0].mediaMsgData)) {
+            const msg = args[0];
+            let meUser = null;
+            try {
+              const userPrefs = window.require('WAWebUserPrefsMeUser');
+              meUser = (userPrefs.getMaybeMePnUser && userPrefs.getMaybeMePnUser()) ||
+                       (userPrefs.getMeUser && userPrefs.getMeUser());
+            } catch (err) {}
+            let statusWid = 'status@broadcast';
+            try {
+              const widFactory = window.require('WAWebWidFactory');
+              if (widFactory?.createWid) statusWid = widFactory.createWid('status@broadcast');
+            } catch (err) {}
+
+            const rawData = msg?.attributes || (typeof msg?.toJSON === 'function' ? msg.toJSON() : msg) || {};
+            const mediaMsgData = {
+              ...rawData,
+              from: meUser,
+              to: statusWid,
+              author: meUser,
+            };
+            return await origMedia.call(this, {
+              mediaMsgData,
+              beforeSend: async () => {},
+              funnelContext: undefined,
+            });
+          }
+          return await origMedia.apply(this, args);
+        };
+        statusAction._cmnexoPatched = true;
+      }
+    } catch (e) {}
+
+    try {
+      // 3. Parchear directamente window.WWebJS.sendMessage para status (PR #201816)
+      if (window.WWebJS && window.WWebJS.sendMessage && !window.WWebJS._cmnexoStatusPatched) {
+        const origSend = window.WWebJS.sendMessage;
+        window.WWebJS.sendMessage = async function(chat, content, options = {}) {
+          let isStatus = false;
+          try {
+            const chatGetters = window.require('WAWebChatGetters');
+            isStatus = chatGetters?.getIsBroadcast ? chatGetters.getIsBroadcast(chat) : (chat?.id?._serialized === 'status@broadcast');
+          } catch (e) {
+            isStatus = (chat?.id?._serialized === 'status@broadcast');
+          }
+
+          if (isStatus && options.media) {
+            const userPrefs = window.require('WAWebUserPrefsMeUser');
+            const lidUser = userPrefs.getMaybeMeLidUser ? userPrefs.getMaybeMeLidUser() : null;
+            const meUser = userPrefs.getMaybeMePnUser ? userPrefs.getMaybeMePnUser() : null;
+            const from = (chat.id && chat.id.isLid && chat.id.isLid()) ? lidUser : meUser;
+
+            const mediaOptions = await window.WWebJS.processMediaData(options.media, {
+              sendToStatus: true,
+            });
+            mediaOptions.caption = options.caption;
+
+            const newId = await window.require('WAWebMsgKey').newId();
+            const newMsgKey = new (window.require('WAWebMsgKey'))({
+              from: from,
+              to: chat.id,
+              id: newId,
+              selfDir: 'out',
+            });
+
+            const message = {
+              ...options,
+              id: newMsgKey,
+              ack: 0,
+              body: mediaOptions.preview,
+              from: from,
+              to: chat.id,
+              local: true,
+              self: 'out',
+              t: Math.floor(Date.now() / 1000),
+              isNewMsg: true,
+              type: 'chat',
+              ...mediaOptions,
+              ...(mediaOptions.toJSON ? mediaOptions.toJSON() : {}),
+            };
+            if (message.__x_id) delete message.__x_id;
+
+            const mediaMsgData = {
+              ...message,
+              from: from,
+              to: chat.id,
+              author: from,
+            };
+
+            await window.require('WAWebSendStatusMsgAction').sendStatusMediaMsgAction({
+              mediaMsgData,
+              beforeSend: async () => {},
+              funnelContext: undefined,
+            });
+
+            return new (window.require('WAWebCollections').Msg.modelClass)(mediaMsgData);
+          }
+          return await origSend.apply(this, arguments);
+        };
+        window.WWebJS._cmnexoStatusPatched = true;
+      }
+    } catch (e) {}
+  }).catch(e => console.warn('[/status] Error en applyStatusPatch:', e.message));
 }
 
 // ── Publicar estado de WhatsApp ──────────────────────────────
@@ -866,18 +992,21 @@ app.post('/status', async (req, res) => {
     let published = false;
     let lastErr   = '';
 
-    // Método 1: WPPConnect (WA-JS) — Soporte real para estados de WhatsApp Web
+    // Aplicar parche para compatibilidad con WhatsApp Web LID
+    if (client.pupPage) {
+      await applyStatusPatch(client.pupPage);
+    }
+
+    // Método 1: WPPConnect (si el módulo status está disponible y listo)
     if (client.pupPage) {
       try {
-        console.log(`[/status] Inyectando WPPConnect para publicar estado rest=${restaurante_id}...`);
         await injectWPP(client.pupPage);
-
         const isVideo = (media.mimetype && media.mimetype.startsWith('video')) || false;
         const dataUri = `data:${media.mimetype};base64,${media.data}`;
 
         const statusRes = await client.pupPage.evaluate(async (dataUrl, cap, isVid) => {
-          if (!window.WPP || !window.WPP.status) {
-            throw new Error('Módulo WPP.status no disponible');
+          if (!window.WPP || !window.WPP.status || typeof window.WPP.status.sendImageStatus !== 'function') {
+            throw new Error('WPP.status no disponible');
           }
           if (isVid) {
             return await window.WPP.status.sendVideoStatus(dataUrl, { caption: cap || '' });
@@ -890,13 +1019,16 @@ app.post('/status', async (req, res) => {
         published = true;
       } catch (wppErr) {
         lastErr = wppErr.message;
-        console.warn(`[/status] WPP falló: ${wppErr.message}`);
+        console.warn(`[/status] WPP status omitido (${wppErr.message}), usando fallback nativo con patch...`);
       }
     }
 
-    // Método 2 (fallback): sendMessage a status@broadcast
+    // Método 2 (fallback nativo de whatsapp-web.js con PR #201816 patch):
     if (!published) {
       try {
+        if (client.pupPage) {
+          await applyStatusPatch(client.pupPage);
+        }
         await client.sendMessage('status@broadcast', media, { caption: caption || '' });
         published = true;
         console.log(`[/status] ✅ Publicado vía status@broadcast rest=${restaurante_id}`);
