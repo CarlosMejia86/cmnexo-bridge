@@ -5,6 +5,16 @@ const fs      = require('fs');
 const path    = require('path');
 const cors    = require('cors');
 
+// ── Manejadores globales de errores para evitar caídas del proceso Node en Railway ─────
+process.on('uncaughtException', (err) => {
+  console.error('[CRITICAL] Excepción no capturada en Node:', err.stack || err.message || err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  const errMsg = reason && (reason.stack || reason.message) ? (reason.stack || reason.message) : reason;
+  console.error('[CRITICAL] Promesa rechazada no manejada:', errMsg);
+});
+
 const app     = express();
 app.use(cors());
 app.use(express.json({ limit: '30mb' }));
@@ -14,7 +24,7 @@ const PORT      = process.env.PORT      || 3000;
 const API_URL   = process.env.API_URL   || 'https://cmnexo.com/api';
 const STORE_URL = process.env.STORE_URL || 'https://cmnexo.com';
 
-console.log('=== CMNexo WA Bridge v1.3.0 iniciando (image support) ===');
+console.log('=== CMNexo WA Bridge v1.3.1 (Railway Volume & Memory Optimized) ===');
 
 /**
  * Normaliza un número de teléfono a formato internacional sin + ni espacios.
@@ -36,11 +46,70 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '.wwebjs_auth');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 /**
+ * Limpieza intensiva de cachés no esenciales de Chromium (Cache, Code Cache, GPUCache, Crashpad)
+ * para evitar que el volumen persistente de Railway (500MB) se sature al 90%-100%.
+ * PRESERVA: IndexedDB y Local Storage (donde residen las credenciales y tokens de WhatsApp).
+ */
+function cleanChromiumCache(sessionId) {
+  const authDir = path.join(DATA_DIR, `session-${sessionId}`);
+  if (!fs.existsSync(authDir)) return;
+
+  const cacheDirNames = [
+    'Cache',
+    'Code Cache',
+    'GPUCache',
+    'DawnWebGPUCache',
+    'Crashpad',
+    'BrowserMetrics',
+    'GrShaderCache',
+    'ShaderCache'
+  ];
+
+  try {
+    function walkAndPrune(dir, depth = 0) {
+      if (depth > 5 || !fs.existsSync(dir)) return;
+      const items = fs.readdirSync(dir, { withFileTypes: true });
+      for (const item of items) {
+        const fullPath = path.join(dir, item.name);
+        if (item.isDirectory()) {
+          if (cacheDirNames.includes(item.name)) {
+            try {
+              fs.rmSync(fullPath, { recursive: true, force: true });
+              console.log(`[${sessionId}] 🧹 Caché eliminada para liberar disco: ${item.name}`);
+            } catch(e) {}
+          } else {
+            walkAndPrune(fullPath, depth + 1);
+          }
+        }
+      }
+    }
+    walkAndPrune(authDir);
+  } catch(e) {
+    console.warn(`[${sessionId}] Advertencia limpiando caché Chromium:`, e.message);
+  }
+}
+
+function cleanAllCaches() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) return;
+    const entries = fs.readdirSync(DATA_DIR, { withFileTypes: true });
+    for (const ent of entries) {
+      if (ent.isDirectory() && ent.name.startsWith('session-')) {
+        const id = ent.name.replace('session-', '');
+        cleanChromiumCache(id);
+      }
+    }
+  } catch(e) {
+    console.warn('[cleanAllCaches] Error liberando espacio:', e.message);
+  }
+}
+
+/**
  * Elimina bloqueos residuales de Chromium (SingletonLock, etc.)
- * que quedan tras caídas o reinicios de contenedor y que impiden
- * que Chromium vuelva a iniciar la sesión existente.
+ * y limpia cachés pesadas que quedan tras caídas o reinicios de contenedor.
  */
 function removeChromiumLocks(sessionId) {
+  cleanChromiumCache(sessionId);
   const authDir = path.join(DATA_DIR, `session-${sessionId}`);
   if (!fs.existsSync(authDir)) return;
   const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'parent.lock'];
@@ -222,11 +291,13 @@ function createSession(restauranteId) {
       clientId: restauranteId,
       dataPath: DATA_DIR
     }),
-    webVersionCache: {
-      type: 'remote',
-      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
-      strict: false
-    },
+    webVersionCache: process.env.WA_VERSION_TYPE === 'none'
+      ? { type: 'none' }
+      : {
+          type: 'remote',
+          remotePath: process.env.WA_VERSION_REMOTE_PATH || 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1018944819-alpha.html',
+          strict: false
+        },
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
@@ -246,10 +317,11 @@ function createSession(restauranteId) {
         '--mute-audio',
         '--safebrowsing-disable-auto-update',
         '--disable-software-rasterizer',
-        '--js-flags=--max-old-space-size=128',
-        '--disk-cache-size=10485760',
-        '--media-cache-size=10485760',
-        '--disable-application-cache',
+        '--no-first-run',
+        '--disable-crash-reporter',
+        '--disable-breakpad',
+        '--disk-cache-size=2097152',
+        '--media-cache-size=2097152',
       ]
     }
   });
@@ -594,6 +666,7 @@ app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
     uptime: Math.round(process.uptime()),
+    active_sessions: Object.keys(sessions).length,
     memory_mb: {
       rss: Math.round(m.rss / 1024 / 1024),
       heapUsed: Math.round(m.heapUsed / 1024 / 1024),
@@ -602,12 +675,29 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.all('/cleanup', (req, res) => {
+  try {
+    cleanAllCaches();
+    if (global.gc) global.gc();
+    res.json({ ok: true, message: 'Cachés de Chromium y memoria liberadas exitosamente' });
+  } catch(e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // Limpieza periódica de memoria RAM cada 5 minutos
 setInterval(() => {
   if (global.gc) {
     try { global.gc(); } catch(e) {}
   }
 }, 5 * 60 * 1000);
+
+// Limpieza periódica de cachés de disco de Chromium en el volumen de Railway cada 30 minutos
+setInterval(() => {
+  if (!isShuttingDown) {
+    cleanAllCaches();
+  }
+}, 30 * 60 * 1000);
 
 app.post('/session/start', async (req, res) => {
   const { restaurante_id, force_fresh } = req.body;
@@ -1172,22 +1262,19 @@ app.post('/status', async (req, res) => {
 async function restoreAllSavedSessions() {
   if (isShuttingDown) return;
   console.log('[restore] 🔍 Verificando y restaurando sesiones guardadas en disco...');
+  cleanAllCaches(); // Limpiar cachés de Chromium para liberar espacio en el volumen de Railway
+
   const candidates = new Set();
 
   try {
     const entries = fs.readdirSync(DATA_DIR);
-    // 1. Archivos session_*.json
+    // Solo restaurar sesiones que realmente tenían un archivo session_*.json con estado connected
     entries.filter(f => f.startsWith('session_') && f.endsWith('.json')).forEach(f => {
-      const id = f.replace('session_', '').replace('.json', '');
-      candidates.add(id);
-    });
-
-    // 2. Carpetas de autenticación session-* generadas por LocalAuth
-    entries.filter(f => f.startsWith('session-')).forEach(f => {
       try {
         const full = path.join(DATA_DIR, f);
-        if (fs.statSync(full).isDirectory()) {
-          const id = f.replace('session-', '');
+        const data = JSON.parse(fs.readFileSync(full, 'utf8'));
+        if (data && (data.status === 'connected' || data.phone)) {
+          const id = f.replace('session_', '').replace('.json', '');
           candidates.add(id);
         }
       } catch(e) {}
@@ -1226,10 +1313,14 @@ async function restoreAllSavedSessions() {
     }
 
     console.log(`[restore] 🚀 Restaurando sesión de WhatsApp para restaurante: ${id}`);
-    createSession(id);
+    try {
+      createSession(id);
+    } catch(err) {
+      console.error(`[restore] Error al iniciar sesión ${id}:`, err.message);
+    }
 
-    // Pausa escalonada de 4s entre inicios para no saturar memoria/CPU en Railway
-    await new Promise(r => setTimeout(r, 4000));
+    // Pausa escalonada de 6s entre inicios para no saturar memoria/CPU en Railway
+    await new Promise(r => setTimeout(r, 6000));
   }
 }
 

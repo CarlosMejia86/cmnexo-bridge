@@ -34,9 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Limitar memoria de Node.js a 256MB y habilitar garbage collection manual
+# Memoria de Node.js ajustada para Railway (512MB) y garbage collection manual
 ENV NODE_ENV=production
-ENV NODE_OPTIONS="--max-old-space-size=256 --expose-gc"
+ENV NODE_OPTIONS="--max-old-space-size=512 --expose-gc"
 
 WORKDIR /app
 
@@ -51,4 +51,4 @@ EXPOSE 3000
 
 # tini se ejecuta como PID 1 para matar automáticamente procesos huérfanos de Chromium
 ENTRYPOINT ["tini", "--"]
-CMD ["node", "--max-old-space-size=256", "--expose-gc", "wa_bridge.js"]
+CMD ["node", "--max-old-space-size=512", "--expose-gc", "wa_bridge.js"]
