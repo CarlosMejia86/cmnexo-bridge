@@ -1,8 +1,30 @@
+const fs   = require('fs');
+const path = require('path');
+
+// ── Auto-parche para whatsapp-web.js: INTRO_IMG_SELECTOR ────────────────────────────────
+// WhatsApp Web modernizó su DOM y eliminó el selector 'intro-md-beta-logo-dark'.
+// Sin este parche, 'waitForSelector' queda esperando indefinidamente y NUNCA dispara
+// el evento 'ready', dejando el bot sordo a los mensajes entrantes.
+try {
+  const clientPath = require.resolve('whatsapp-web.js/src/Client.js');
+  if (fs.existsSync(clientPath)) {
+    let content = fs.readFileSync(clientPath, 'utf8');
+    if (!content.includes('div[role="textbox"]')) {
+      content = content.replace(
+        /const INTRO_IMG_SELECTOR = [^;]+;/,
+        `const INTRO_IMG_SELECTOR = 'div[role="textbox"], [data-icon="chat"], #side, [data-testid="chat-list"], [data-testid="intro-title"], header';`
+      );
+      fs.writeFileSync(clientPath, content, 'utf8');
+      console.log('✅ [patch] whatsapp-web.js INTRO_IMG_SELECTOR parcheado exitosamente');
+    }
+  }
+} catch(e) {
+  console.warn('⚠️ [patch] Error verificando parche en Client.js:', e.message);
+}
+
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode  = require('qrcode');
 const express = require('express');
-const fs      = require('fs');
-const path    = require('path');
 const cors    = require('cors');
 
 // ── Manejadores globales de errores para evitar caídas del proceso Node en Railway ─────
@@ -363,12 +385,15 @@ function createSession(restauranteId) {
 
   function writeSessionConnected() {
     const sesPath = path.join(DATA_DIR, `session_${restauranteId}.json`);
-    if (fs.existsSync(sesPath)) return; // ya escrito
     const phone = client.info?.wid?.user || 'N/A';
     console.log(`[${restauranteId}] ✅ Sesión activa detectada — phone: ${phone}`);
     fs.writeFileSync(sesPath, JSON.stringify({ status: 'connected', phone }));
     if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
     if (readyCheckInterval) { clearInterval(readyCheckInterval); readyCheckInterval = null; }
+
+    if (client.pupPage) {
+      setTimeout(() => attachWppMessageListener(), 3000);
+    }
   }
 
   client.on('authenticated', () => {
@@ -377,7 +402,6 @@ function createSession(restauranteId) {
     if (fs.existsSync(qrPath)) fs.unlinkSync(qrPath);
 
     // Fallback: verificar cada 5s si client.info ya está disponible
-    // (cubre el caso en que 'ready' se dispara antes de que este listener esté listo)
     readyCheckInterval = setInterval(() => {
       if (client.info?.wid?.user) writeSessionConnected();
     }, 5000);
@@ -406,6 +430,7 @@ function createSession(restauranteId) {
   client.on('ready', () => {
     console.log(`[${restauranteId}] ✅ WhatsApp listo (evento ready)`);
     writeSessionConnected();
+    setTimeout(() => attachWppMessageListener(), 2000);
 
     // Pre-cargar WPP y aplicar parches de compatibilidad en segundo plano
     if (client.pupPage) {
@@ -500,6 +525,53 @@ function createSession(restauranteId) {
     }, 8000);
   });
 
+  // ── Listener secundario con WPPConnect (WA-JS) ──────────────────────────────
+  // Si whatsapp-web.js experimenta retraso o desfase en los selectores de WhatsApp Web,
+  // WPPConnect captura los mensajes entrantes directamente desde el socket/store de WhatsApp
+  let wppListenerAttached = false;
+  async function attachWppMessageListener() {
+    if (wppListenerAttached || !client.pupPage) return;
+    try {
+      await injectWPP(client.pupPage);
+      const exposeName = `onWppMsg_${restauranteId.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      try {
+        await client.pupPage.exposeFunction(exposeName, async (rawMsg) => {
+          try {
+            await handleMsg(rawMsg);
+          } catch(err) {
+            console.error(`[${restauranteId}] Error en handleMsg vía WPP:`, err.message);
+          }
+        });
+      } catch(expErr) {} // Si ya fue expuesta anteriormente, continuar
+
+      await client.pupPage.evaluate((fnName) => {
+        if (window.WPP && window.WPP.on && !window._wppMsgHooked) {
+          window._wppMsgHooked = true;
+          window.WPP.on('chat.new_message', (m) => {
+            if (!m || m.fromMe) return;
+            const from = m.from || m.chatId || '';
+            const body = m.body || m.caption || '';
+            const msgId = m.id?._serialized || m.id || String(Date.now());
+            if (window[fnName]) {
+              window[fnName]({
+                from,
+                fromMe: false,
+                body,
+                type: m.type || 'chat',
+                id: { id: msgId, _serialized: msgId }
+              });
+            }
+          });
+          console.log('[WPP] Listener chat.new_message registrado exitosamente');
+        }
+      }, exposeName);
+      wppListenerAttached = true;
+      console.log(`[${restauranteId}] 🛡️ Listener WPPConnect activo como respaldo para captura de mensajes`);
+    } catch(e) {
+      console.warn(`[${restauranteId}] Aviso registrando listener WPP:`, e.message);
+    }
+  }
+
   // Deduplicador: evita procesar el mismo mensaje dos veces si disparan ambos eventos
   const _processedMsgIds = new Set();
 
@@ -531,8 +603,10 @@ function createSession(restauranteId) {
     // Obtener número de teléfono real del contacto (resuelve cuentas @lid)
     let realPhone = from;
     try {
-      const contact = await msg.getContact();
-      if (contact && contact.number) realPhone = contact.number;
+      if (typeof msg.getContact === 'function') {
+        const contact = await msg.getContact();
+        if (contact && contact.number) realPhone = contact.number;
+      }
     } catch(e) { /* usar from como fallback */ }
 
     // Guardar mapa teléfono normalizado → chatId real para notificaciones correctas
@@ -640,8 +714,14 @@ function createSession(restauranteId) {
         try {
           await client.sendMessage(chatId, texto);
         } catch(sendErr) {
-          console.warn(`[${restauranteId}] client.sendMessage falló (${sendErr.message}), intentando msg.reply direct...`);
-          await msg.reply(texto);
+          console.warn(`[${restauranteId}] client.sendMessage falló (${sendErr.message}), intentando fallback directo...`);
+          if (typeof msg.reply === 'function') {
+            await msg.reply(texto);
+          } else if (client.pupPage) {
+            await client.pupPage.evaluate(async (to, txt) => {
+              if (window.WPP && window.WPP.chat) await window.WPP.chat.sendTextMessage(to, txt);
+            }, chatId, texto);
+          }
         }
         console.log(`[${restauranteId}] ✅ Mensaje enviado correctamente a ${from}`);
       }

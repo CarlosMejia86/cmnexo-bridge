@@ -44,6 +44,9 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
+# Parche crítico para que WhatsApp Web moderno dispare el evento 'ready' e inyecte los listeners de mensajes
+RUN node -e "const fs = require('fs'); const p = 'node_modules/whatsapp-web.js/src/Client.js'; if (fs.existsSync(p)) { let c = fs.readFileSync(p, 'utf8'); c = c.replace(/const INTRO_IMG_SELECTOR = [^;]+;/, \"const INTRO_IMG_SELECTOR = 'div[role=\\\"textbox\\\"], [data-icon=\\\"chat\\\"], #side, [data-testid=\\\"chat-list\\\"], [data-testid=\\\"intro-title\\\"], header';\"); fs.writeFileSync(p, c); console.log('✅ Patched INTRO_IMG_SELECTOR in whatsapp-web.js'); }"
+
 # Copiar el código fuente
 COPY . .
 
