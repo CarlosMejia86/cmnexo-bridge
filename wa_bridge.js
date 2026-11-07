@@ -392,7 +392,24 @@ function createSession(restauranteId) {
     if (readyCheckInterval) { clearInterval(readyCheckInterval); readyCheckInterval = null; }
 
     if (client.pupPage) {
-      setTimeout(() => attachWppMessageListener(), 3000);
+      // Intentar adjuntar WPP listener, con reintentos si falla en el primer intento
+      let wppRetries = 0;
+      const tryAttachWpp = () => {
+        attachWppMessageListener().then(() => {
+          if (!wppListenerAttached && wppRetries < 5) {
+            wppRetries++;
+            console.log(`[${restauranteId}] Reintentando WPP listener (intento ${wppRetries}/5)...`);
+            setTimeout(tryAttachWpp, 10000);
+          }
+        }).catch(e => {
+          if (wppRetries < 5) {
+            wppRetries++;
+            console.warn(`[${restauranteId}] Error en WPP listener (intento ${wppRetries}/5): ${e.message}`);
+            setTimeout(tryAttachWpp, 10000);
+          }
+        });
+      };
+      setTimeout(tryAttachWpp, 3000);
     }
   }
 
@@ -711,19 +728,64 @@ function createSession(restauranteId) {
       }
 
       if (texto) {
-        try {
-          await client.sendMessage(chatId, texto);
-        } catch(sendErr) {
-          console.warn(`[${restauranteId}] client.sendMessage falló (${sendErr.message}), intentando fallback directo...`);
-          if (typeof msg.reply === 'function') {
-            await msg.reply(texto);
-          } else if (client.pupPage) {
-            await client.pupPage.evaluate(async (to, txt) => {
-              if (window.WPP && window.WPP.chat) await window.WPP.chat.sendTextMessage(to, txt);
-            }, chatId, texto);
+        let enviado = false;
+
+        // Método 1: WPP directo (wa-js) — más confiable cuando ready no disparó correctamente
+        if (client.pupPage) {
+          try {
+            await injectWPP(client.pupPage);
+            const wppOk = await Promise.race([
+              client.pupPage.evaluate(async (to, txt) => {
+                if (window.WPP && window.WPP.chat && typeof window.WPP.chat.sendTextMessage === 'function') {
+                  await window.WPP.chat.sendTextMessage(to, txt);
+                  return true;
+                }
+                return false;
+              }, chatId, texto),
+              new Promise((_, rej) => setTimeout(() => rej(new Error('WPP timeout 15s')), 15000))
+            ]);
+            if (wppOk) {
+              enviado = true;
+              console.log(`[${restauranteId}] ✅ Mensaje enviado vía WPP a ${from}`);
+            }
+          } catch(wppErr) {
+            console.warn(`[${restauranteId}] WPP sendTextMessage falló (${wppErr.message}), probando client.sendMessage...`);
           }
         }
-        console.log(`[${restauranteId}] ✅ Mensaje enviado correctamente a ${from}`);
+
+        // Método 2: whatsapp-web.js nativo con timeout de 20s
+        if (!enviado) {
+          try {
+            await Promise.race([
+              client.sendMessage(chatId, texto),
+              new Promise((_, rej) => setTimeout(() => rej(new Error('sendMessage timeout 20s')), 20000))
+            ]);
+            enviado = true;
+            console.log(`[${restauranteId}] ✅ Mensaje enviado vía client.sendMessage a ${from}`);
+          } catch(sendErr) {
+            console.warn(`[${restauranteId}] client.sendMessage falló (${sendErr.message})`);
+          }
+        }
+
+        // Método 3: msg.reply() como último recurso
+        if (!enviado && typeof msg.reply === 'function') {
+          try {
+            await Promise.race([
+              msg.reply(texto),
+              new Promise((_, rej) => setTimeout(() => rej(new Error('reply timeout 15s')), 15000))
+            ]);
+            enviado = true;
+            console.log(`[${restauranteId}] ✅ Mensaje enviado vía msg.reply() a ${from}`);
+          } catch(replyErr) {
+            console.warn(`[${restauranteId}] msg.reply falló (${replyErr.message})`);
+          }
+        }
+
+        if (!enviado) {
+          console.error(`[${restauranteId}] ❌ Todos los métodos de envío fallaron para ${from}`);
+        } else {
+          console.log(`[${restauranteId}] ✅ Mensaje enviado correctamente a ${from}`);
+        }
       }
     } catch(e) {
       console.error(`[${restauranteId}] ❌ Error enviando respuesta:`, e.message);
@@ -816,6 +878,49 @@ app.get('/health', (req, res) => {
       heapTotal: Math.round(m.heapTotal / 1024 / 1024)
     }
   });
+});
+
+// Endpoint de diagnóstico: inspecciona el estado interno del cliente WA y del Store WPP
+app.get('/diag/:id?', async (req, res) => {
+  const id = req.params.id;
+  const sesIds = id ? [id] : Object.keys(sessions);
+  const result = {};
+  for (const sid of sesIds) {
+    const cl = sessions[sid];
+    if (!cl) { result[sid] = { error: 'Sin sesión en memoria' }; continue; }
+    const info = {
+      hasInfo: !!(cl.info && cl.info.wid),
+      phone: cl.info?.wid?.user || null,
+      pupPage: !!cl.pupPage,
+      wppInjected: false,
+      wppChatAvail: false,
+      storeAvail: false,
+      restaurantName: restaurantNames[sid] || null,
+      restaurantSchedule: restaurantSchedules[sid] ? 'cargado' : 'NO cargado',
+    };
+    if (cl.pupPage) {
+      try {
+        const diagResult = await Promise.race([
+          cl.pupPage.evaluate(() => ({
+            wpp: typeof window.WPP !== 'undefined',
+            wppChat: !!(window.WPP && window.WPP.chat),
+            wppChatSend: !!(window.WPP && window.WPP.chat && typeof window.WPP.chat.sendTextMessage === 'function'),
+            store: typeof window.Store !== 'undefined',
+            WWebJS: typeof window.WWebJS !== 'undefined',
+          })),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('diag timeout')), 5000))
+        ]);
+        info.wppInjected = diagResult.wpp;
+        info.wppChatAvail = diagResult.wppChatSend;
+        info.storeAvail = diagResult.store;
+        info.WWebJSAvail = diagResult.WWebJS;
+      } catch(e) {
+        info.diagError = e.message;
+      }
+    }
+    result[sid] = info;
+  }
+  res.json(result);
 });
 
 app.all('/cleanup', (req, res) => {
@@ -1079,7 +1184,37 @@ app.post('/notify', async (req, res) => {
     }
 
     // Envío solo texto (si no había media o falló el envío con media)
-    await client.sendMessage(chatId, message);
+    let enviado = false;
+
+    // Método 1: WPP directo con timeout
+    if (client.pupPage) {
+      try {
+        await injectWPP(client.pupPage);
+        const wppOk = await Promise.race([
+          client.pupPage.evaluate(async (to, txt) => {
+            if (window.WPP && window.WPP.chat && typeof window.WPP.chat.sendTextMessage === 'function') {
+              await window.WPP.chat.sendTextMessage(to, txt);
+              return true;
+            }
+            return false;
+          }, chatId, message),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('WPP timeout 15s')), 15000))
+        ]);
+        if (wppOk) enviado = true;
+      } catch(e) {
+        console.warn(`[${sessionId}] notify: WPP falló (${e.message})`);
+      }
+    }
+
+    // Método 2: client.sendMessage con timeout
+    if (!enviado) {
+      await Promise.race([
+        client.sendMessage(chatId, message),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('sendMessage timeout 20s')), 20000))
+      ]);
+      enviado = true;
+    }
+
     logActivity(sessionId, { type: 'out', text: `Notif → ${chatId}: ${message.substring(0, 40)}` });
     res.json({ ok: true });
   } catch(e) {
