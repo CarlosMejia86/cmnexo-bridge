@@ -62,7 +62,13 @@ function cleanChromiumCache(sessionId) {
     'Crashpad',
     'BrowserMetrics',
     'GrShaderCache',
-    'ShaderCache'
+    'ShaderCache',
+    'CacheStorage',
+    'ScriptCache',
+    'blob_storage',
+    'File System',
+    'optimization_guide_hint_cache_store',
+    'Shared Dictionary'
   ];
 
   try {
@@ -80,6 +86,10 @@ function cleanChromiumCache(sessionId) {
           } else {
             walkAndPrune(fullPath, depth + 1);
           }
+        } else if (item.name.endsWith('.dmp') || item.name.endsWith('.tmp') || item.name === 'debug.log') {
+          try {
+            fs.unlinkSync(fullPath);
+          } catch(e) {}
         }
       }
     }
@@ -96,6 +106,17 @@ function cleanAllCaches() {
     for (const ent of entries) {
       if (ent.isDirectory() && ent.name.startsWith('session-')) {
         const id = ent.name.replace('session-', '');
+        const authDir = path.join(DATA_DIR, ent.name);
+        // Si la carpeta quedó marcada como inválida o es huérfana (sin session_*.json y no activa en memoria)
+        const sesPath = path.join(DATA_DIR, `session_${id}.json`);
+        const isInvalid = fs.existsSync(path.join(authDir, '.invalidated'));
+        if (isInvalid || (!fs.existsSync(sesPath) && !sessions[id])) {
+          try {
+            fs.rmSync(authDir, { recursive: true, force: true });
+            console.log(`[cleanAllCaches] 🗑️ Carpeta huérfana/inválida eliminada: ${ent.name}`);
+            continue;
+          } catch(e) {}
+        }
         cleanChromiumCache(id);
       }
     }
@@ -661,12 +682,47 @@ app.get('/', (req, res) => res.json({
   data_dir: fs.existsSync(DATA_DIR) ? 'active' : 'missing'
 }));
 
+function getDirSizeBytes(dirPath) {
+  let size = 0;
+  try {
+    if (!fs.existsSync(dirPath)) return 0;
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const ent of entries) {
+      const full = path.join(dirPath, ent.name);
+      if (ent.isDirectory()) {
+        size += getDirSizeBytes(full);
+      } else {
+        try { size += fs.statSync(full).size; } catch(e) {}
+      }
+    }
+  } catch(e) {}
+  return size;
+}
+
 app.get('/health', (req, res) => {
   const m = process.memoryUsage();
+  let volumeUsedMb = 0;
+  const sessionsInfo = [];
+  try {
+    if (fs.existsSync(DATA_DIR)) {
+      const entries = fs.readdirSync(DATA_DIR, { withFileTypes: true });
+      for (const ent of entries) {
+        if (ent.isDirectory() && ent.name.startsWith('session-')) {
+          const sBytes = getDirSizeBytes(path.join(DATA_DIR, ent.name));
+          const sMb = Math.round(sBytes / 1024 / 1024);
+          volumeUsedMb += sMb;
+          sessionsInfo.push({ id: ent.name.replace('session-', ''), size_mb: sMb });
+        }
+      }
+    }
+  } catch(e) {}
+
   res.status(200).json({
     status: 'OK',
     uptime: Math.round(process.uptime()),
     active_sessions: Object.keys(sessions).length,
+    volume_used_mb: volumeUsedMb,
+    sessions_on_disk: sessionsInfo,
     memory_mb: {
       rss: Math.round(m.rss / 1024 / 1024),
       heapUsed: Math.round(m.heapUsed / 1024 / 1024),
