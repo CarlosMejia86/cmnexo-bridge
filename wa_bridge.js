@@ -505,9 +505,14 @@ function createSession(restauranteId) {
 
   async function handleMsg(msg) {
     if (!msg || !msg.from) return;
-    if (msg.fromMe) return;
-    if (msg.from.endsWith('@g.us')) return;
-    if (msg.isGroupMsg) return;
+    if (msg.fromMe) {
+      console.log(`[${restauranteId}] ℹ️ Mensaje enviado desde la propia cuenta (${msg.from}) — ignorado para evitar bucles`);
+      return;
+    }
+    if (msg.from.endsWith('@g.us') || msg.isGroupMsg) {
+      console.log(`[${restauranteId}] ℹ️ Mensaje de grupo ignorado (${msg.from})`);
+      return;
+    }
 
     // Deduplicar por ID de mensaje
     const msgId = msg.id?.id || msg.id?._serialized;
@@ -568,27 +573,21 @@ function createSession(restauranteId) {
 
     // --- PEDIDO ACTIVO: no responder si el cliente ya tiene un pedido en proceso ---
     // Usar realPhone (número real resuelto) para mayor precisión en la búsqueda
-    // Intentar con realPhone primero; si falla, reintentar con `from`
     let tieneActivo = false;
     for (const telParam of [realPhone, from]) {
       try {
         const activeRes = await fetch(
           `${API_URL}/pedidos/activo?restaurante_id=${baseId}&telefono=${encodeURIComponent(telParam)}&cid=${encodeURIComponent(fullChatId)}`,
-          { signal: AbortSignal.timeout(6000) }
+          { signal: AbortSignal.timeout(4000) }
         );
         if (activeRes.ok) {
           const activeData = await activeRes.json();
           if (activeData.activo) { tieneActivo = true; break; }
-          break; // respuesta válida (false) → no reintentar con el otro número
+          break; // respuesta válida (false) → no reintentar
         }
       } catch(e) {
-        console.warn(`[${restauranteId}] Error verificando pedido activo con tel=${telParam}:`, e.message);
-        // Si el primer intento (realPhone) falla por red, probar con `from`
-        if (telParam === from) {
-          // Ambos fallaron: para evitar enviar durante un pedido activo, bloquear
-          console.warn(`[${restauranteId}] No se pudo verificar pedido activo — silenciando respuesta automática`);
-          return;
-        }
+        console.warn(`[${restauranteId}] Aviso verificando pedido activo (${telParam}):`, e.message);
+        // Si hay fallo de red con la API, no bloquear el bot; continuar normalmente
       }
     }
     if (tieneActivo) {
@@ -638,11 +637,16 @@ function createSession(restauranteId) {
       }
 
       if (texto) {
-        await client.sendMessage(chatId, texto);
+        try {
+          await client.sendMessage(chatId, texto);
+        } catch(sendErr) {
+          console.warn(`[${restauranteId}] client.sendMessage falló (${sendErr.message}), intentando msg.reply direct...`);
+          await msg.reply(texto);
+        }
         console.log(`[${restauranteId}] ✅ Mensaje enviado correctamente a ${from}`);
       }
     } catch(e) {
-      console.error(`[${restauranteId}] ❌ Error sendMessage:`, e.message);
+      console.error(`[${restauranteId}] ❌ Error enviando respuesta:`, e.message);
       logActivity(restauranteId, { type: 'out', text: `Error al responder: ${e.message.substring(0,25)}` });
     }
   }
@@ -653,7 +657,10 @@ function createSession(restauranteId) {
     try { await handleMsg(msg); } catch(e) { console.error(`[${restauranteId}] Error handleMsg(message):`, e.message); }
   });
   client.on('message_create', async (msg) => {
-    if (msg.fromMe) return; // evitar loop: ignorar los mensajes que envía el bot
+    if (msg.fromMe) {
+      console.log(`[${restauranteId}] ℹ️ Mensaje enviado desde el propio número vinculado (+${client.info?.wid?.user || ''}) — el bot lo ignora para evitar bucle`);
+      return;
+    }
     try { await handleMsg(msg); } catch(e) { console.error(`[${restauranteId}] Error handleMsg(message_create):`, e.message); }
   });
 
